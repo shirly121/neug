@@ -25,7 +25,9 @@
 #include <charconv>
 #include "neug/common/types.h"
 #include "neug/execution/common/types/graph_types.h"
+#include "neug/execution/common/types/owned_property.h"
 #include "neug/execution/utils/numeric_cast.h"
+#include "neug/utils/property/list_view.h"
 
 namespace neug {
 class Property;
@@ -631,9 +633,8 @@ bool Value::ApplyComparisonOp(const Value& lhs, const Value& rhs) {
   }
 }
 
-Property value_to_property(const Value& value);
-Value property_to_value(const Property& property,
-                        const DataType& type = DataType::UNKNOWN);
+OwnedProperty value_to_property(const Value& value);
+Value property_to_value(const Property& property, const DataType& type);
 
 template <typename T>
 Value performCast(const Value& input) {
@@ -720,6 +721,11 @@ inline Value performCast<neug::Date>(const Value& input) {
 Value performCastToString(const Value& input);
 
 void encode_value(const Value& val, Encoder& encoder);
+
+// Convert a storage-layer ListView into an execution-layer Value::LIST.
+// The ListView's underlying buffer must remain valid for the duration of
+// this call (the resulting Value owns its data independently).
+Value listViewToValue(const neug::ListView& lv);
 
 }  // namespace execution
 }  // namespace neug
