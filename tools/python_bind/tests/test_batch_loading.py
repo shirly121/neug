@@ -473,3 +473,122 @@ class TestBachLoading(unittest.TestCase):
 
         conn.close()
         db.close()
+
+    def test_copy_from_vs_load_from_with_column_remap(self):
+            """
+            Compare three data-loading patterns on the same large CSV:
+
+            Case 1: COPY node FROM "data.csv"
+                    Direct bulk load, columns match CSV order – no remap.
+
+            Case 2: COPY node_remap FROM (LOAD FROM "data.csv"
+                                            RETURN col_e, col_d, col_c, col_b, col_a, id)
+                    LOAD FROM is a subquery inside COPY FROM.  The RETURN clause
+                    reverses column order, so ProjectIntoDataSourceOptimizer must
+                    push a column remap into the data source.
+
+            Case 3: LOAD FROM "data.csv" RETURN col_e, col_d, col_c, col_b, col_a, id
+                    Standalone LOAD FROM with remap, results returned to client.
+            """
+            db_dir = "/tmp/test_copy_vs_load_remap"
+            shutil.rmtree(db_dir, ignore_errors=True)
+            os.makedirs(db_dir, exist_ok=True)
+
+            num_rows = 1000000
+
+            # ---- Generate CSV ----
+            csv_path = os.path.join(db_dir, "data.csv")
+            logger.info(f"Generating CSV with {num_rows} rows ...")
+            gen_start = time.time()
+            with open(csv_path, "w") as f:
+                f.write("id|col_a|col_b|col_c|col_d|col_e\n")
+                for i in range(num_rows):
+                    f.write(
+                        f"{i}|StrA_{i}|{i * 10}|{i * 0.1:.2f}|StrD_{i % 100}|{i + 1000}\n"
+                    )
+            gen_elapsed = time.time() - gen_start
+            file_size_mb = os.path.getsize(csv_path) / (1024 * 1024)
+            logger.info(
+                f"CSV generation: {gen_elapsed:.2f}s, "
+                f"file size: {file_size_mb:.1f} MB"
+            )
+
+            db = Database(db_dir, "w")
+            conn = db.connect()
+
+            # Schema for Case 1: matches CSV column order
+            conn.execute(
+                "CREATE NODE TABLE data_node("
+                "id INT64, col_a STRING, col_b INT64, col_c DOUBLE, "
+                "col_d STRING, col_e INT64, PRIMARY KEY(id));"
+            )
+            # Schema for Case 2: matches the REVERSED column order from LOAD FROM
+            conn.execute(
+                "CREATE NODE TABLE data_node_remap("
+                "col_e INT64, col_d STRING, col_c DOUBLE, col_b INT64, "
+                "col_a STRING, id INT64, PRIMARY KEY(col_e));"
+            )
+
+            # # ---- Case 1: COPY FROM CSV (no remap) ----
+            # copy_start = time.time()
+            # conn.execute(f'COPY data_node FROM "{csv_path}"')
+            # copy_elapsed = time.time() - copy_start
+            # logger.info(f"Case 1  COPY FROM CSV       : {copy_elapsed:.2f}s  ({num_rows} rows)")
+
+            # res = list(conn.execute("MATCH (n:data_node) RETURN count(n);"))
+            # assert res[0] == [num_rows], f"Expected {num_rows} rows after COPY FROM"
+
+            # ---- Case 2: COPY FROM (LOAD FROM CSV) with remap ----
+            logger.info("start to run copy from (load from) query")
+            copy_load_start = time.time()
+            conn.execute(
+                f'COPY data_node_remap FROM ('
+                f'  LOAD FROM "{csv_path}"'
+                f'  RETURN col_e, col_d, col_c, col_b, col_a, id'
+                f')'
+            )
+            copy_load_elapsed = time.time() - copy_load_start
+            logger.info(
+                f"Case 2  COPY FROM (LOAD FROM): {copy_load_elapsed:.2f}s  ({num_rows} rows)"
+            )
+
+            # res = list(conn.execute("MATCH (n:data_node_remap) RETURN count(n);"))
+            # assert res[0] == [num_rows], (
+            #     f"Expected {num_rows} rows after COPY FROM (LOAD FROM), got {res[0]}"
+            # )
+            # # Spot-check remapped values
+            # spot = list(conn.execute(
+            #     "MATCH (n:data_node_remap) WHERE n.col_e = 1000 RETURN n.id, n.col_a;"
+            # ))
+            # assert len(spot) == 1
+            # assert spot[0][0] == 0, f"id should be 0, got {spot[0][0]}"
+            # assert spot[0][1] == "StrA_0", f"col_a should be StrA_0, got {spot[0][1]}"
+
+            # # ---- Case 3: LOAD FROM RETURN (remap, no COPY) ----
+            # load_start = time.time()
+            # result = conn.execute(
+            #     f'LOAD FROM "{csv_path}" '
+            #     f'RETURN count(*)'
+            # )
+            # load_elapsed = time.time() - load_start
+            # records = list(result)
+            # logger.info(
+            #     f"Case 3  LOAD FROM RETURN    : {load_elapsed:.2f}s  ({len(records)} rows)"
+            # )
+
+            # assert records[0] == [num_rows]
+
+            # assert len(records) == num_rows
+            # first = records[0]
+            # assert first[0] == 1000, f"col_e of row 0 should be 1000, got {first[0]}"
+            # assert first[5] == 0, f"id of row 0 should be 0, got {first[5]}"
+
+            # ---- Summary ----
+            logger.info("=" * 60)
+            # logger.info(f"  Case 1  COPY FROM CSV        : {copy_elapsed:.3f}s")
+            logger.info(f"  Case 2  COPY FROM (LOAD FROM): {copy_load_elapsed:.3f}s")
+            # logger.info(f"  Case 3  LOAD FROM RETURN     : {load_elapsed:.3f}s")
+            logger.info("=" * 60)
+
+            conn.close()
+            db.close()

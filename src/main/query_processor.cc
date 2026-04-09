@@ -14,12 +14,35 @@
  */
 
 #include "neug/main/query_processor.h"
+
+#include <chrono>
+#include <fstream>
+#include <sstream>
+
 #include "neug/execution/common/context.h"
 #include "neug/execution/common/operators/retrieve/sink.h"
 #include "neug/execution/execute/plan_parser.h"
 #include "neug/main/neug_db.h"
 #include "neug/storages/graph/property_graph.h"
 #include "neug/utils/pb_utils.h"
+
+namespace {
+
+// Read current process RSS (Resident Set Size) in MB from /proc/self/status
+double get_rss_mb() {
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line)) {
+    if (line.compare(0, 6, "VmRSS:") == 0) {
+      long kb = 0;
+      std::sscanf(line.c_str(), "VmRSS: %ld kB", &kb);
+      return kb / 1024.0;
+    }
+  }
+  return -1.0;
+}
+
+}  // namespace
 
 namespace neug {
 
@@ -41,7 +64,13 @@ QueryProcessor::check_and_retrieve_pipeline(const std::string& query_string,
   auto access_mode = user_access_mode.empty()
                          ? planner_->analyzeMode(query_string)
                          : ParseAccessMode(user_access_mode);
+  auto compile_start = std::chrono::high_resolution_clock::now();
   GS_AUTO(cache_value, global_query_cache_->Get(g_.schema(), query_string));
+  auto compile_elapsed =
+      std::chrono::duration<double>(std::chrono::high_resolution_clock::now() -
+                                    compile_start)
+          .count();
+  LOG(INFO) << "Compile elapsed: " << compile_elapsed << " s";
   assert(cache_value);
   const auto& flags = cache_value->flags;
   if (is_read_only_) {
@@ -115,9 +144,13 @@ result<QueryResult> QueryProcessor::execute_internal(
     std::shared_ptr<execution::CacheValue> cache_value, AccessMode access_mode,
     const execution::ParamsMap& parameters, int32_t num_threads) {
   StorageAPUpdateInterface graph(g_, 0, allocator_);
-  std::unique_ptr<execution::OprTimer> timer_ptr = nullptr;
+  auto timer_ptr = std::make_unique<execution::OprTimer>();
+  double mem0 = get_rss_mb();
+  auto t0 = std::chrono::high_resolution_clock::now();
   auto ctx_res = cache_value->pipeline.Execute(graph, execution::Context(),
                                                parameters, timer_ptr.get());
+  auto t1 = std::chrono::high_resolution_clock::now();
+  double mem1 = get_rss_mb();
   if (!ctx_res) {
     LOG(ERROR) << "Error in executing query: " << query_string
                << ", error code: " << ctx_res.error().error_code()
@@ -126,14 +159,51 @@ result<QueryResult> QueryProcessor::execute_internal(
   }
 
   google::protobuf::Arena arena;
-  // Create a QueryResponse message on the arena to hold the results.
   neug::QueryResponse* response =
       google::protobuf::Arena::CreateMessage<neug::QueryResponse>(&arena);
   neug::execution::Sink::sink_results(ctx_res.value(), graph, response);
+  auto t2 = std::chrono::high_resolution_clock::now();
+  double mem2 = get_rss_mb();
   response->mutable_schema()->CopyFrom(cache_value->result_schema);
   QueryResult ret = QueryResult::From(response->SerializeAsString());
+  auto t3 = std::chrono::high_resolution_clock::now();
+  double mem3 = get_rss_mb();
+  const auto& responsePB = ret.response();
+  // SpaceUsedLong: protobuf's approximate recursive heap for this message tree
+  // (owned buffers, submessages, repeated fields). Not RSS; not wire size.
+  const size_t heap_bytes = responsePB.SpaceUsedLong();
+  const size_t wire_bytes = static_cast<size_t>(responsePB.ByteSizeLong());
+  LOG(INFO) << "QueryResponse heap (SpaceUsedLong): " << heap_bytes
+            << " bytes (" << (heap_bytes / 1048576.0)
+            << " MB); wire (ByteSizeLong): " << wire_bytes << " bytes ("
+            << (wire_bytes / 1048576.0) << " MB)";
 
   update_compiler_meta_if_needed(cache_value->flags, access_mode);
+  auto t4 = std::chrono::high_resolution_clock::now();
+
+  {
+    std::ostringstream oss;
+    timer_ptr->output("  ", oss);
+    auto sec = [](auto a, auto b) {
+      return std::chrono::duration<double>(b - a).count();
+    };
+    LOG(INFO) << "Query: " << query_string;
+    LOG(INFO) << "  pipeline.Execute : " << sec(t0, t1) << " s";
+    LOG(INFO) << "  sink_results     : " << sec(t1, t2) << " s";
+    LOG(INFO) << "  serialize        : " << sec(t2, t3) << " s";
+    LOG(INFO) << "  update_meta      : " << sec(t3, t4) << " s";
+    LOG(INFO) << "  total            : " << sec(t0, t4) << " s";
+    LOG(INFO) << "Memory (RSS):";
+    LOG(INFO) << "  before execute   : " << mem0 << " MB";
+    LOG(INFO) << "  after execute    : " << mem1 << " MB (+" << mem1 - mem0
+              << ")";
+    LOG(INFO) << "  after sink       : " << mem2 << " MB (+" << mem2 - mem1
+              << ")";
+    LOG(INFO) << "  after serialize  : " << mem3 << " MB (+" << mem3 - mem2
+              << ")";
+    LOG(INFO) << "Operator timing:\n" << oss.str();
+  }
+
   return ret;
 }
 

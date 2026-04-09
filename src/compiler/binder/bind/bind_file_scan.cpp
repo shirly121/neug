@@ -20,7 +20,11 @@
  * Zhou Xiaoli in 2025 to support Neug-specific features.
  */
 
+#include <chrono>
 #include <memory>
+
+#include <glog/logging.h>
+
 #include "neug/compiler/binder/binder.h"
 #include "neug/compiler/binder/bound_scan_source.h"
 #include "neug/compiler/binder/expression/expression.h"
@@ -175,7 +179,13 @@ std::unique_ptr<BoundBaseScanSource> Binder::bindFileScanSource(
   auto& expectedColumnNames = extraInput->expectedColumnNames;
   auto& expectedColumnTypes = extraInput->expectedColumnTypes;
 
+  auto sniff_start = std::chrono::high_resolution_clock::now();
   auto sniffSchema = sniff(*fileScanInfo, func);
+  auto sniff_elapsed =
+      std::chrono::duration<double>(std::chrono::high_resolution_clock::now() -
+                                    sniff_start)
+          .count();
+  LOG(INFO) << "sniff elapsed: " << sniff_elapsed << " s";
   if (sniffSchema->columnNames.size() != sniffSchema->columnTypes.size()) {
     THROW_BINDER_EXCEPTION("Sniffer Column names size " +
                            std::to_string(sniffSchema->columnNames.size()) +
