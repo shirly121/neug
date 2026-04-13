@@ -86,6 +86,7 @@ ProjectIntoDataSourceOptimizer::visitOperator(
       }
     }
   }
+  return visitOp;
 }
 
 std::shared_ptr<planner::LogicalOperator>

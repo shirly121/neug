@@ -278,7 +278,16 @@ void ArrowReader::batch_read(std::shared_ptr<arrow::dataset::Scanner> scanner,
   if (!scanner) {
     THROW_INVALID_ARGUMENT_EXCEPTION("Scanner is null");
   }
+  double before_count_rss = GetRssMb();
   auto row_num_result = scanner->CountRows();
+  double after_count_rss = GetRssMb();
+  if (before_count_rss >= 0 && after_count_rss >= 0) {
+    LOG(INFO) << "ArrowReader::batch_read RSS: before CountRows="
+              << before_count_rss << " MB, after CountRows=" << after_count_rss
+              << " MB, delta=" << (after_count_rss - before_count_rss) << " MB";
+  } else {
+    LOG(INFO) << "ArrowReader::batch_read RSS: unavailable (no /proc VmRSS)";
+  }
   int64_t row_num = 0;
   if (!row_num_result.ok()) {
     LOG(WARNING) << "Failed to count rows via scanner: "
