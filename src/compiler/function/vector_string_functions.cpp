@@ -25,6 +25,7 @@
 #include "neug/compiler/function/neug_scalar_function.h"
 #include "neug/compiler/function/string/functions/array_extract_function.h"
 
+#include "neug/compiler/function/struct/vector_struct_functions.h"
 #include "neug/execution/common/types/value.h"
 
 using namespace neug::common;
@@ -67,7 +68,8 @@ function_set UpperFunction::getFunctionSet() {
   return functionSet;
 }
 
-execution::Value UpperFunction::Exec(const std::vector<execution::Value>& args) {
+execution::Value UpperFunction::Exec(
+    const std::vector<execution::Value>& args) {
   if (args.size() != 1) {
     THROW_RUNTIME_ERROR("UPPER: expect exactly 1 argument, got " +
                         std::to_string(args.size()));
@@ -89,7 +91,8 @@ function_set LowerFunction::getFunctionSet() {
   return functionSet;
 }
 
-execution::Value LowerFunction::Exec(const std::vector<execution::Value>& args) {
+execution::Value LowerFunction::Exec(
+    const std::vector<execution::Value>& args) {
   if (args.size() != 1) {
     THROW_RUNTIME_ERROR("LOWER: expect exactly 1 argument, got " +
                         std::to_string(args.size()));
@@ -111,7 +114,8 @@ function_set ReverseFunction::getFunctionSet() {
   return functionSet;
 }
 
-execution::Value ReverseFunction::Exec(const std::vector<execution::Value>& args) {
+execution::Value ReverseFunction::Exec(
+    const std::vector<execution::Value>& args) {
   if (args.size() != 1) {
     THROW_RUNTIME_ERROR("REVERSE: expect exactly 1 argument, got " +
                         std::to_string(args.size()));

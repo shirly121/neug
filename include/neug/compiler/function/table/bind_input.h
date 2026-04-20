@@ -74,6 +74,9 @@ struct NEUG_API TableFuncBindInput {
     return params[idx];
   }
   common::Value getValue(common::idx_t idx) const;
+
+  common::Value parseValue(common::idx_t idx, binder::Binder* binder) const;
+
   template <typename T>
   T getLiteralVal(common::idx_t idx) const;
 };

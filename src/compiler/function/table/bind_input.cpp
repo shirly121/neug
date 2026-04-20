@@ -21,9 +21,14 @@
  */
 
 #include "neug/compiler/function/table/bind_input.h"
+#include <algorithm>
 
+#include "neug/compiler/binder/binder.h"
 #include "neug/compiler/binder/expression/expression_util.h"
 #include "neug/compiler/binder/expression/literal_expression.h"
+#include "neug/compiler/binder/expression/scalar_function_expression.h"
+#include "neug/compiler/common/enums/expression_type.h"
+#include "neug/compiler/function/list/vector_list_functions.h"
 
 namespace neug {
 namespace function {
@@ -38,6 +43,34 @@ common::Value TableFuncBindInput::getValue(common::idx_t idx) const {
       *params[idx], common::ExpressionType::LITERAL);
   return params[idx]->constCast<binder::LiteralExpression>().getValue();
 }
+
+// bool needFold(binder::Expression &expr) {
+//   if (expr.expressionType == common::ExpressionType::FUNCTION) {
+//     auto& funcExpr = expr.constCast<binder::ScalarFunctionExpression>();
+//     if (funcExpr.getFunction().name == function::ListCreationFunction::name)
+//     {
+//       // auto children = funcExpr.getChildren();
+//       // return std::find_if(children.begin(), children.end(), [](const auto
+//       &child) {
+//       //   return child->expressionType != common::ExpressionType::LITERAL;
+//       // }) == children.end();
+//       return true;
+//     }
+//   }
+//   return false;
+// }
+
+// common::Value TableFuncBindInput::parseValue(common::idx_t idx,
+// binder::Binder *binder) const {
+//   const auto &expr = params[idx];
+//   if (needFold(*expr)) {
+//     auto value = binder->getExpressionBinder()->foldExpression(expr);
+//     return value->constCast<binder::LiteralExpression>().getValue();
+//   }
+//   binder::ExpressionUtil::validateExpressionType(
+//       *expr, common::ExpressionType::LITERAL);
+//   return expr->constCast<binder::LiteralExpression>().getValue();
+// }
 
 template <typename T>
 T TableFuncBindInput::getLiteralVal(common::idx_t idx) const {
