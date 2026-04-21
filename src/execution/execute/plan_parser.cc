@@ -250,6 +250,9 @@ static std::string get_opr_name(
   case physical::PhysicalOpr_Operator::OpKindCase::kProcedureCall: {
     return "procedure_call";
   }
+  case physical::PhysicalOpr_Operator::OpKindCase::kGdsAlgo: {
+    return "gds_algo";
+  }
   case physical::PhysicalOpr_Operator::OpKindCase::kCheckpoint: {
     return "checkpoint";
   }

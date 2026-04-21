@@ -24,6 +24,7 @@
 #include "neug/compiler/catalog/catalog.h"
 #include "neug/compiler/common/enums/table_type.h"
 #include "neug/compiler/function/export/export_function.h"
+#include "neug/compiler/function/gds/gds_algo_function.h"
 #include "neug/compiler/function/table/scan_file_function.h"
 #include "neug/compiler/gopt/g_alias_manager.h"
 #include "neug/compiler/planner/operator/logical_hash_join.h"
@@ -48,6 +49,7 @@ struct ExecutionFlag {
   bool create_temp_table = false;
   bool transaction = false;
   bool procedure_call = false;
+  bool gds_algo = false;
 };
 
 class GPhysicalAnalyzer {
@@ -129,6 +131,16 @@ class GPhysicalAnalyzer {
     auto tableFuncOp = op.constPtrCast<planner::LogicalTableFunctionCall>();
     auto bindData = tableFuncOp->getBindData();
     return dynamic_cast<function::ScanFileBindData*>(bindData) != nullptr;
+  }
+
+  bool isGDSAlgoCall(const planner::LogicalOperator& op) {
+    if (op.getOperatorType() !=
+        planner::LogicalOperatorType::TABLE_FUNCTION_CALL) {
+      return false;
+    }
+    auto tableFuncOp = op.constPtrCast<planner::LogicalTableFunctionCall>();
+    auto bindData = tableFuncOp->getBindData();
+    return dynamic_cast<function::GDSFuncBindData*>(bindData) != nullptr;
   }
 
   void collectAtomicScan(std::shared_ptr<planner::LogicalOperator> child,
@@ -231,6 +243,8 @@ class GPhysicalAnalyzer {
     case planner::LogicalOperatorType::TABLE_FUNCTION_CALL: {
       if (isDataSource(op)) {
         flag.batch = true;
+      } else if (isGDSAlgoCall(op)) {
+        flag.gds_algo = true;
       } else {
         flag.procedure_call = true;
       }

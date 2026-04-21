@@ -28,6 +28,7 @@
 #include "neug/compiler/binder/expression/rel_expression.h"
 #include "neug/compiler/catalog/catalog.h"
 #include "neug/compiler/catalog/catalog_entry/node_table_catalog_entry.h"
+#include "neug/compiler/catalog/catalog_entry/rel_table_catalog_entry.h"
 #include "neug/compiler/common/constants.h"
 #include "neug/compiler/common/enums/accumulate_type.h"
 #include "neug/compiler/common/enums/expression_type.h"
@@ -39,6 +40,7 @@
 #include "neug/compiler/function/export/export_function.h"
 #include "neug/compiler/function/read_function.h"
 #include "neug/compiler/function/table/bind_input.h"
+#include "neug/compiler/function/gds/gds_algo_function.h"
 #include "neug/compiler/function/table/scan_file_function.h"
 #include "neug/compiler/function/table/table_function.h"
 #include "neug/compiler/gopt/g_alias_manager.h"
@@ -46,6 +48,7 @@
 #include "neug/compiler/gopt/g_ddl_converter.h"
 #include "neug/compiler/gopt/g_graph_type.h"
 #include "neug/compiler/gopt/g_physical_convertor.h"
+#include "neug/compiler/gopt/g_rel_table_entry.h"
 #include "neug/compiler/planner/operator/extend/logical_recursive_extend.h"
 #include "neug/compiler/planner/operator/logical_filter.h"
 #include "neug/compiler/planner/operator/logical_hash_join.h"
@@ -1216,9 +1219,55 @@ void GQueryConvertor::convertTableFunc(
   auto bindData = funcCall.getBindData();
   if (dynamic_cast<const function::ScanFileBindData*>(bindData)) {
     convertDataSource(funcCall, plan);
+  } else if (dynamic_cast<const function::GDSFuncBindData*>(bindData)) {
+    convertGDSFunction(funcCall, plan);
   } else {
     convertProcedureCall(funcCall, plan);
   }
+}
+
+void GQueryConvertor::convertGDSFunction(
+    const planner::LogicalTableFunctionCall& funcCall,
+    ::physical::PhysicalPlan* plan) {
+  auto* bindData = funcCall.getBindData();
+  auto& gdsData = bindData->cast<function::GDSFuncBindData>();
+  auto gdsPB = std::make_unique<::physical::GDSAlgo>();
+  gdsPB->set_algo_name(gdsData.algoName);
+  auto* sub = gdsPB->mutable_sub_graph();
+  for (auto& info : gdsData.graphEntry.nodeInfos) {
+    auto* v = sub->add_vertex_entries();
+    v->set_label_id(static_cast<int32_t>(info.entry->getTableID()));
+    if (info.predicate != nullptr) {
+      auto pred = exprConvertor->convert(*info.predicate, {});
+      v->set_allocated_predicate(pred.release());
+    }
+  }
+  for (auto& info : gdsData.graphEntry.relInfos) {
+    auto& relEntry = info.entry->constCast<catalog::GRelTableCatalogEntry>();
+    auto* e = sub->add_edge_entries();
+    e->set_src_label_id(static_cast<int32_t>(relEntry.getSrcTableID()));
+    e->set_edge_label_id(static_cast<int32_t>(relEntry.getLabelId()));
+    e->set_dst_label_id(static_cast<int32_t>(relEntry.getDstTableID()));
+    if (info.predicate != nullptr) {
+      auto pred = exprConvertor->convert(*info.predicate, {});
+      e->set_allocated_predicate(pred.release());
+    }
+  }
+  for (const auto& kv : gdsData.options) {
+    (*gdsPB->mutable_options())[kv.first] = kv.second;
+  }
+
+  auto physicalPB = std::make_unique<::physical::PhysicalOpr>();
+  auto oprPB = std::make_unique<::physical::PhysicalOpr_Operator>();
+  oprPB->set_allocated_gds_algo(gdsPB.release());
+  physicalPB->set_allocated_opr(oprPB.release());
+  auto schema = funcCall.getSchema();
+  if (!schema) {
+    THROW_EXCEPTION_WITH_FILE_LINE("Table function schema is not set");
+  }
+  auto exprInScope = schema->getExpressionsInScope();
+  setMetaData(physicalPB.get(), funcCall, exprInScope);
+  plan->mutable_plan()->AddAllocated(physicalPB.release());
 }
 
 void GQueryConvertor::convertProcedureCall(

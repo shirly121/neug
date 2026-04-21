@@ -46,7 +46,7 @@ static bool needFold(binder::Expression& expr) {
       auto children = funcExpr.getChildren();
       for (auto child : children) {
         if (child->expressionType != common::ExpressionType::LITERAL &&
-            !needFold(*child)) {
+          !needFold(*child)) {
           return false;
         }
       }
@@ -56,8 +56,7 @@ static bool needFold(binder::Expression& expr) {
   return false;
 }
 
-std::shared_ptr<Expression> Binder::convertParam(
-    const std::shared_ptr<Expression>& expr) const {
+std::shared_ptr<Expression> Binder::convertParam(const std::shared_ptr<Expression> &expr) const {
   if (needFold(*expr)) {
     return expressionBinder.foldExpression(expr);
   }
@@ -119,10 +118,11 @@ BoundTableScanInfo Binder::bindTableFunc(
     outputColumns.push_back(
         createVariable(outputColumn.first, outputColumn.second));
   }
-  const auto& tableFunc = callFunc->constPtrCast<TableFunction>();
-  const auto& bindFunc = tableFunc->bindFunc;
+  const auto &tableFunc = callFunc->constPtrCast<TableFunction>();
+  const auto &bindFunc = tableFunc->bindFunc;
   if (bindFunc) {
     TableFuncBindInput tableBindInput;
+    tableBindInput.binder = this;
     tableBindInput.params = positionalParams;
     tableBindInput.yieldVariables = yieldVariables;
     if (auto customBindData = bindFunc(clientContext, &tableBindInput)) {
