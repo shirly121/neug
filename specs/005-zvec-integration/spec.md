@@ -483,6 +483,101 @@ class IndexLocalState {
 };
 ```
 
+#### Transaction
+
+NeuG 在 AP 和 TP 模式下对 Transaction/Checkpoint/Concurrency 支持程度有所不同：
+
+| Mode | Atomic | Isolation | Durability |
+| AP | 不支持 ｜ 独占锁 ｜ Checkpoint ｜
+| TP | 支持 ｜ Read/Insert: MVCC, Update/Schema: 独占锁 ｜ WAL + Checkpoint |
+
+此外，NeuG 当前 Transaction 上的一些限制：数据导入操作 (COPY FROM) 目前仅在 AP 模式下支持，不能保证原子性，数据写入过程中出现异常会导致当前内存数据只有部分写成功；
+
+**Create Index**
+
+目前仅在 AP 场景下支持 Create Index，在 Create Index 后，建议用户通过显示 `Checkpoint` 保存当前建好的索引数据。中间索引数据写坏不保证回滚，会存在部分数据成功，部分数据失败的问题。
+
+```python
+conn.execute("""
+    CREATE INDEX vec_hnsw_index
+    ON vector_node
+    USING HNSW (vec)
+    WITH (metric = 'cosine');
+""")
+conn.execute("Checkpoint")
+```
+
+**Append Data**
+
+```cypher
+// 更新向量数据，并更新索引数据
+Create (n:vector_node {id: 1, vec: [0.1, 0.1, 0.2, 0.2]});
+```
+该查询为 `INSERT` 模式，会进入 `INSERT_TRANSACTION`，主要流程为：
+- `AddVertex`：将点数据暂时保存在当前 transaction_state，图数据还未更新
+- `AddIndex`：构建索引数据保存在当前 transaction_state，索引存储还未更新
+- `Abort`：出现异常后，直接丢弃 transaction_state
+- `Commit`：将 transaction_state 内容正式提交到图数据库中
+
+我们进一步展开 `Commit` 步骤：
+- `WAL`：在 WAL 日志中追加 AddVertex 操作（不需要追加 AddIndex 操作，AddVertex 自动调用 AddIndex）
+- `AddVertexUndo`：在插入数据前，记录 `AddVertexUndo` 日志，用于撤销修改 （未支持）
+- `GraphStorage::AddVertex`：将 transaction_state 点属性数据插入到图存储中
+- `IndexStorage::AddIndex`：将 transaction_state 索引数据插入到索引存储中
+- `处理异常`：中间出现任何异常，调用 `AddVertexUndo`，撤销图数据更新（未支持），删除已插入的索引数据，撤销 WAL 记录 (未支持)
+
+**Delete Data**
+
+```cypher
+// 删除向量数据，删除索引数据
+MATCH (n:vector_node)
+WHERE n.id = 1
+DELETE n;
+```
+
+该查询为 `UPDATE` 模式，会进入 `UPDATE_TRANSACTION`，主要流程为：
+- `DeleteVertexUndo`：在删除点之前记录 `DeleteVertexUndo` 日志，用于恢复删除操作
+- `GraphStorage::DeleteVertex`：删除点数据，实际为标记删除，不会真正删除点数据
+- `IndexStorage::DeleteIndex`：删除索引数据，在 HNSWIndex 中仅删除 vid <-> doc_id mapping，不会真正删除索引数据
+- `Abort`：出现异常后，执行 `DeleteVertexUndo`，撤销属性和索引的删除操作
+- `Commit`：
+    - 写 WAL 日志，记录 DeleteVertex 操作；
+    - Schema 相关的删除操作会放在 Commit 阶段真正生效，比如 `DropVertex/DropProperty`，如果这些操作失败，则需要通过 `DeleteVertexUndo` 回滚之前已经删除的属性和索引数据
+
+**Update Data**
+
+```cypher
+MATCH (n:vector_node)
+WHERE n.id = 1
+SET n.vec = [0.1, 0.1, 0.1, 0.1]
+```
+该查询为 `UPDATE` 模式，会进入 `UPDATE_TRANSACTION`，主要流程为：
+- `UpdateVertexUndo`：在更新点之前记录 `UpdateVertexUndo` 日志
+- `GraphStorage::UpdateVertex`：emplace 修改点属性数据
+- `IndexStorage::UpdateIndex`：先删除索引+新增索引，内部更新 vid <-> doc_id mapping
+- `Abort`：出现异常后，执行 `UpdateVertexUndo`，撤销属性和索引的更新操作
+- `Commit`：
+    - 写 WAL 日志，记录 UpdateVertex 操作；
+    - 其它操作失败，需要通过 `UpdateVertexUndo` 回滚之前已经更新的属性和索引数据
+
+**Drop Index**
+
+```cypher
+DROP Index vec_hnsw_index IF EXISTS;
+```
+
+Schema 相关的删除操作会经过两个阶段：
+- `Soft Delete`：在 COMMIT 以前先软删除，也就是标记删除，但并不真正删除数据，这样可以保证当前 transaction 中的其它操作可以看见当前删除操作，同时也避免 Abort 时无法恢复数据的问题，Abort 真正恢复的是这些 SoftDelete 操作
+- `Hard Delete`：在 Commit 时才真正删除数据，但如果 Commit 中间发生异常，已经删除的数据是无法再恢复的
+
+DropIndex 也采用同样的设计，具体流程如下：
+- `DropIndexUndo`：先记录 `DropIndexUndo` 操作，Abort 时可以撤销软删除
+- `IndexStorage::DropIndex(soft=true)`：标记删除，不真正删除索引数据
+- `Abort`：出现异常后，执行 `DropIndexUndo`，撤销索引软删除
+- `Commit`：
+    - 写 WAL 日志，记录 DropIndex 操作
+    - `IndexStorage::DropIndex(soft=false)`：hard 删除索引数据，中间任意操作失败都无法回滚，因为数据已经被删除，无法恢复
+
 ## 方案二：外表
 
 ### 外部临时表
