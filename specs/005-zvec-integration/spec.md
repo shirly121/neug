@@ -492,6 +492,16 @@ NeuG 在 AP 和 TP 模式下对 Transaction/Checkpoint/Concurrency 支持程度�
 
 此外，NeuG 当前 Transaction 上的一些限制：数据导入操作 (COPY FROM) 目前仅在 AP 模式下支持，不能保证原子性，数据写入过程中出现异常会导致当前内存数据只有部分写成功；
 
+索引主要操作类型有：
+
+| 操作类型 | 典型触发场景 |
+|----------|----------------|
+| `CREATE_INDEX` | `CREATE INDEX ...` |
+| `DROP_INDEX` | `DROP INDEX`、删列/删表导致隐式删索引 |
+| `APPEND_INDEX_DATA` | `INSERT`、`COPY`、行内新顶点带向量列 |
+| `DELETE_INDEX_DATA` | `DELETE` 顶点，vid 自索引中剔除 |
+| `UPDATE_INDEX_DATA` | `SET` 向量列 |
+
 **Create Index**
 
 目前仅在 AP 场景下支持 Create Index，在 Create Index 后，建议用户通过显示 `Checkpoint` 保存当前建好的索引数据。中间索引数据写坏不保证回滚，会存在部分数据成功，部分数据失败的问题。
@@ -575,6 +585,44 @@ Create (n:vector_node {id: 1, vec: [0.1, 0.1, 0.2, 0.2]});
 - `IndexStorage::AddIndex`：将 transaction_state 索引数据插入到索引存储中
 - `处理异常`：中间出现任何异常，调用 `AddVertexUndo`，撤销图数据更新（未支持），删除已插入的索引数据，撤销 WAL 记录 (未支持)
 
+```mermaid
+flowchart TB
+  subgraph main[INSERT 模式 → INSERT_TRANSACTION]
+    A[AddVertex: 点数据缓存在 transaction_state，图存储尚未更新]
+    B[AddIndex: 索引数据缓存在 transaction_state，索引存储尚未更新]
+    A --> B
+  end
+
+  B --> C{执行结果}
+
+  C -->|异常| D[Abort: 丢弃 transaction_state]
+  C -->|继续提交| E[Commit]
+
+  subgraph commit[展开 Commit]
+    F[WAL: 追加 AddVertex 操作]
+    G[AddVertexUndo: 插入前记录撤销日志]
+    H[GraphStorage::AddVertex: 将点属性提交到图存储]
+    I[IndexStorage::AddIndex: 将索引数据提交到索引存储]
+  end
+
+  E --> F --> G --> H --> I
+  I --> J{是否异常?}
+
+  J -->|否| K[完成]
+  J -->|是| L[处理异常]
+  L --> M[AddVertexUndo：回滚图数据]
+  L --> N[删除已写入的索引数据]
+  L --> O[撤销 WAL 记录]
+  M -. 未实现 .- M2[( )]
+  O -. 未实现 .- O2[( )]
+
+  style M2 fill:transparent,stroke:transparent
+  style O2 fill:transparent,stroke:transparent
+  style G2 fill:transparent,stroke:transparent
+
+```
+
+
 **Delete Data**
 
 ```cypher
@@ -593,6 +641,33 @@ DELETE n;
     - 写 WAL 日志，记录 DeleteVertex 操作；
     - Schema 相关的删除操作会放在 Commit 阶段真正生效，比如 `DropVertex/DropProperty`，如果这些操作失败，则需要通过 `DeleteVertexUndo` 回滚之前已经删除的属性和索引数据
 
+```mermaid
+flowchart TB
+  subgraph main[UPDATE 模式 → UPDATE_TRANSACTION · DELETE]
+    A[DeleteVertexUndo: 删除前记录撤销日志，用于恢复删除]
+    B[GraphStorage::DeleteVertex: 标记删除，不物理删除点数据]
+    C[IndexStorage::DeleteIndex: 仅删除 vid ↔ doc_id mapping]
+    A --> B --> C
+  end
+
+  C --> D{执行结果}
+
+  D -->|异常| E[Abort: 执行 DeleteVertexUndo，撤销属性与索引删除]
+  D -->|继续提交| F[Commit]
+
+  subgraph commit[展开 Commit]
+    G[WAL: 记录 DeleteVertex 操作]
+    H[Schema 删除落地: DropVertex/DropProperty 等在 Commit 生效]
+  end
+
+  F --> G --> H
+  H --> I{是否异常?}
+
+  I -->|否| K[完成]
+  I -->|是| L[处理异常]
+  L --> M[DeleteVertexUndo: 回滚已删属性与索引]
+```
+
 **Update Data**
 
 ```cypher
@@ -608,6 +683,32 @@ SET n.vec = [0.1, 0.1, 0.1, 0.1]
 - `Commit`：
     - 写 WAL 日志，记录 UpdateVertex 操作；
     - 其它操作失败，需要通过 `UpdateVertexUndo` 回滚之前已经更新的属性和索引数据
+
+```mermaid
+flowchart TB
+  subgraph main[UPDATE 模式 → UPDATE_TRANSACTION · UPDATE]
+    A[UpdateVertexUndo: 更新前记录撤销日志]
+    B[GraphStorage::UpdateVertex: emplace 修改点属性]
+    C[IndexStorage::UpdateIndex: 先删后增索引，更新 vid 与 doc_id mapping]
+    A --> B --> C
+  end
+
+  C --> D{执行结果}
+
+  D -->|异常| E[Abort: 执行 UpdateVertexUndo，撤销属性与索引更新]
+  D -->|继续提交| F[Commit]
+
+  subgraph commit[展开 Commit]
+    G[WAL: 记录 UpdateVertex 操作]
+  end
+
+  F --> G
+  G --> H{是否异常?}
+
+  H -->|否| I[完成]
+  H -->|是| J[处理异常]
+  J --> K[UpdateVertexUndo: 回滚已更新的属性与索引<br/>含 Commit 中其它步骤失败场景]
+```
 
 **Drop Index**
 
@@ -626,6 +727,32 @@ DropIndex 也采用同样的设计，具体流程如下：
 - `Commit`：
     - 写 WAL 日志，记录 DropIndex 操作
     - `IndexStorage::DropIndex(soft=false)`：hard 删除索引数据，中间任意操作失败都无法回滚，因为数据已经被删除，无法恢复
+
+```mermaid
+flowchart TB
+  subgraph main[DROP INDEX：COMMIT 前 Soft Delete，Commit 时 Hard Delete]
+    A[DropIndexUndo: 记录撤销，Abort 时可撤销软删除]
+    B[IndexStorage::DropIndex: soft=true，标记删除索引]
+    A --> B
+  end
+
+  B --> C{执行结果}
+
+  C -->|异常| D[Abort: 执行 DropIndexUndo，撤销软删除]
+  C -->|继续提交| E[Commit]
+
+  subgraph commit[展开 Commit]
+    F[WAL: 记录 DropIndex 操作]
+    G[IndexStorage::DropIndex: soft=false，硬删除索引数据]
+  end
+
+  E --> F --> G
+  G --> H{是否异常?}
+
+  H -->|否| I[完成]
+  H -->|是| J[处理异常]
+  J --> K[硬删除已完成则无法回滚<br/>数据已删，与 Soft Delete 阶段不同]
+```
 
 ## 方案二：外表
 
