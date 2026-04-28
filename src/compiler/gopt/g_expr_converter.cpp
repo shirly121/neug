@@ -28,6 +28,7 @@
 #include "neug/compiler/binder/expression/rel_expression.h"
 #include "neug/compiler/binder/expression/scalar_function_expression.h"
 #include "neug/compiler/binder/expression/variable_expression.h"
+#include "neug/compiler/binder/expression_evaluator_utils.h"
 #include "neug/compiler/common/enums/expression_type.h"
 #include "neug/compiler/common/string_utils.h"
 #include "neug/compiler/common/types/date_t.h"
@@ -266,6 +267,29 @@ std::unique_ptr<::common::Value> GExprConverter::castLiteral(
   return convertValue(*castValue);
 }
 
+bool needFold(std::shared_ptr<binder::Expression> expr) {
+  if (expr->expressionType != common::ExpressionType::FUNCTION) {
+    return false;
+  }
+
+  auto& funcExpr = expr->constCast<binder::ScalarFunctionExpression>();
+  auto children = funcExpr.getChildren();
+  for (auto child : children) {
+    if (child->expressionType != common::ExpressionType::LITERAL &&
+        !needFold(child)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::shared_ptr<binder::Expression> GExprConverter::foldExpression(
+    std::shared_ptr<binder::Expression> expr) {
+  auto value = evaluator::ExpressionEvaluatorUtils::evaluateConstantExpression(
+      expr, ctx);
+  return std::make_shared<binder::LiteralExpression>(value, "");
+}
+
 // set default value for property definition
 std::unique_ptr<::common::Value> GExprConverter::convertDefaultValue(
     const binder::PropertyDefinition& propertyDef) {
@@ -288,6 +312,8 @@ std::unique_ptr<::common::Value> GExprConverter::convertDefaultValue(
             "child");
       }
       defaultExpr = funcExpr->getChild(0);
+    } else if (needFold(defaultExpr)) {
+      defaultExpr = foldExpression(defaultExpr);
     }
   }
   auto valuePB = convert(*defaultExpr, {});
