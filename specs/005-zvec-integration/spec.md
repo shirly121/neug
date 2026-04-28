@@ -448,9 +448,7 @@ struct ScanFunction {
 }
 ```
 
-#### ACID
-
-**transaction**
+#### Transaction (Before)
 
 我们主要考虑如何在 `insert_transaction` 和 `update_transaction` 中支持索引更新操作。首先将索引相关变更归为五类（与 `IndexManager` 操作一一对应）：
 
@@ -483,13 +481,14 @@ class IndexLocalState {
 };
 ```
 
-#### Transaction
+#### Transaction (Latest)
 
 NeuG 在 AP 和 TP 模式下对 Transaction/Checkpoint/Concurrency 支持程度有所不同：
 
-| Mode | Atomic | Isolation | Durability |
-| AP | 不支持 ｜ 独占锁 ｜ Checkpoint ｜
-| TP | 支持 ｜ Read/Insert: MVCC, Update/Schema: 独占锁 ｜ WAL + Checkpoint |
+| Mode | Atomicity | Isolation | Durability |
+|------|-------------|-----------|------------|
+| AP | 不支持 | 独占锁 | 仅 Checkpoint |
+| TP | 支持 | Read/Insert：MVCC；Update/Schema：独占锁 | WAL + Checkpoint |
 
 此外，NeuG 当前 Transaction 上的一些限制：数据导入操作 (COPY FROM) 目前仅在 AP 模式下支持，不能保证原子性，数据写入过程中出现异常会导致当前内存数据只有部分写成功；
 
@@ -505,6 +504,56 @@ conn.execute("""
     WITH (metric = 'cosine');
 """)
 conn.execute("Checkpoint")
+```
+
+如何基于 ZVec 实现 HNSW 索引持久化？
+
+```c++
+class HNSWIndex : Index {
+public:
+    HNSWIndex(const std::string &name,
+        const std::string &type_name,
+        label_t label_id,
+        const ColumnInfo &column_info,
+        case_insensitive_map_t<Value> &options,
+        const std::string index_path) {
+        // 以内存方式打开索引数据文件
+        target_param.storage_options = kMemory;
+        // 或者以 MMAP 方式打开索引数据文件，但开启 copy_on_write 机制，
+        // 需要通过显示 flush/close 才能将更新数据写回到磁盘
+        target_param.storage_options = kMMAP;
+        target_params.copy_on_write = true;
+        zvec_index = IndexBridge::Create(target_param);
+    }
+
+    Status Checkpoint(IndexLock &lock) {
+        // Close or Flush 操作将内存索引数据写回到磁盘
+        zec_index.Close();
+    }
+
+    Status Search(
+        StorageReadInterface &read_transaction,
+        IndexQueryParams params,
+        std::vector<vid_t> &results);
+
+    Status Append(
+        IndexLock &lock,
+        vid_t vid,
+        const std::vector<Property> &values);
+
+    Status Delete(IndexLock &lock, vid_t vid);
+
+    Status Update(
+        IndexLock &lock,
+        vid_t vid,
+        const std::vector<Property> &new_values);
+    
+    Status Drop(IndexLock &lock);
+protected:
+    IndexBridge zvec_index;
+    std::string index_path;
+    HNSWDocIdMap vertex_doc_map;
+};
 ```
 
 **Append Data**
