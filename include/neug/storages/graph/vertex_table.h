@@ -14,11 +14,14 @@
  */
 #pragma once
 
+#include <arrow/memory_pool.h>
+
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/graph/vertex_timestamp.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/arrow_utils.h"
 #include "neug/utils/indexers.h"
+#include "neug/utils/mem_utils.h"
 #include "neug/utils/property/table.h"
 
 namespace neug {
@@ -278,6 +281,7 @@ class VertexTable {
 
   template <typename PK_T>
   void insert_vertices_impl(std::shared_ptr<IRecordBatchSupplier> supplier) {
+    LOG(INFO) << "start to insert vertices";
     auto row_nums = supplier->RowNum();
     if (row_nums <= 0) {
       LOG(WARNING) << "Row number from supplier is negative, treat it as 0.";
@@ -291,12 +295,29 @@ class VertexTable {
       }
       EnsureCapacity(cap);
     }
+    neug::MemTracer mem_tracer("insert_vertices_impl");
+    mem_tracer.checkpoint("after_EnsureCapacity");
     std::shared_mutex rw_mutex;
+    int batch_idx = 0;
+    double rss_before_batch = neug::GetCurrentRSSMB();
+    // Track per-batch RSS to measure if Arrow memory is bounded
+    std::vector<std::weak_ptr<arrow::RecordBatch>> batch_trackers;
+    double rss_prev_end = neug::GetCurrentRSSMB();
+    int64_t total_rows_inserted = 0;
+    // Track Arrow memory pool to distinguish allocator-level free vs OS-level free
+    auto* pool = arrow::default_memory_pool();
+    int64_t pool_before_loop = pool->bytes_allocated();
     while (true) {
+      int64_t pool_before_get = pool->bytes_allocated();
+      double rss_before_get = neug::GetCurrentRSSMB();
       auto batch = supplier->GetNextBatch();
       if (batch == nullptr) {
         break;
       }
+      double rss_after_get = neug::GetCurrentRSSMB();
+      int64_t pool_after_get = pool->bytes_allocated();
+      batch_trackers.push_back(batch);
+
       auto columns = batch->columns();
       const auto& property_names = vertex_schema_->property_names;
       CHECK(columns.size() == property_names.size() + 1)
@@ -306,7 +327,6 @@ class VertexTable {
       auto ind = std::get<2>(vertex_schema_->primary_keys[0]);
       auto pk_array = columns[ind];
       columns.erase(columns.begin() + ind);
-      // Add capacity checking logic when performing the actual batch insert.
       size_t new_size = indexer_.size() + batch->num_rows();
       if (new_size > indexer_.capacity()) {
         size_t cap = indexer_.capacity();
@@ -316,6 +336,7 @@ class VertexTable {
         EnsureCapacity(cap);
       }
 
+      int64_t batch_rows = batch->num_rows();
       auto vids = insert_primary_keys<PK_T>(pk_array);
 
       for (size_t i = 0; i < columns.size(); ++i) {
@@ -323,9 +344,48 @@ class VertexTable {
         auto chunked_array = std::make_shared<arrow::ChunkedArray>(columns[i]);
         set_properties_column(col, chunked_array, vids, rw_mutex);
       }
-      VLOG(10) << "Inserted " << pk_array->length()
-               << " vertices, current vertex num: " << VertexNum();
+
+      double rss_after_insert = neug::GetCurrentRSSMB();
+      int64_t pool_after_insert = pool->bytes_allocated();
+      // Release all Arrow references
+      columns.clear();
+      pk_array.reset();
+      batch.reset();
+      double rss_after_release = neug::GetCurrentRSSMB();
+      int64_t pool_after_release = pool->bytes_allocated();
+
+      total_rows_inserted += batch_rows;
+      // Count alive batches
+      int num_alive = 0;
+      for (auto& wk : batch_trackers) {
+        if (!wk.expired()) num_alive++;
+      }
+      // Log with Arrow pool stats
+      VLOG(1) << "[MemTrace:batch_mem] idx=" << batch_idx
+              << " rows=" << batch_rows
+              << " num_alive=" << num_alive
+              << " get_cost=" << (rss_after_get - rss_before_get)
+              << " insert_cost=" << (rss_after_insert - rss_after_get)
+              << " release_reclaimed=" << (rss_after_insert - rss_after_release)
+              << " pool_get_delta=" << (pool_after_get - pool_before_get)
+              << " pool_release_delta=" << (pool_after_insert - pool_after_release)
+              << " pool_total=" << pool_after_release
+              << " net_per_batch=" << (rss_after_release - rss_before_get)
+              << " total_RSS=" << rss_after_release
+              << " total_delta=" << (rss_after_release - rss_before_batch);
+
+      rss_prev_end = rss_after_release;
+      batch_idx++;
     }
+    int64_t pool_after_loop = pool->bytes_allocated();
+    VLOG(1) << "[MemTrace:insert_vertices_impl] total_batches=" << batch_idx
+            << " RSS_final=" << neug::GetCurrentRSSMB()
+            << " total_growth=" << (neug::GetCurrentRSSMB() - rss_before_batch)
+            << " pool_before=" << pool_before_loop
+            << " pool_after=" << pool_after_loop
+            << " pool_delta=" << (pool_after_loop - pool_before_loop)
+            << " MB";
+    mem_tracer.checkpoint("after_all_batches");
   }
 
   IndexerType indexer_;

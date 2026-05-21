@@ -19,9 +19,13 @@
 
 #include "neug/utils/reader/reader.h"
 
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "neug/utils/mem_utils.h"
 
 #include <arrow/array/array_base.h>
 #include <arrow/compute/api_scalar.h>
@@ -129,6 +133,12 @@ std::shared_ptr<arrow::dataset::Scanner> ArrowReader::createScanner(
   }
   auto dataset = dataset_result.ValueOrDie();
 
+  // // Minimize readahead to reduce Arrow holding batch references in buffer
+  // scan_opts->batch_readahead = 1;
+  // scan_opts->fragment_readahead = 1;
+  LOG(INFO) << "[DIAG] ScanOptions: batch_size=" << scan_opts->batch_size
+            << " batch_readahead=" << scan_opts->batch_readahead
+            << " fragment_readahead=" << scan_opts->fragment_readahead;
   arrow::dataset::ScannerBuilder scanner_builder(dataset, scan_opts);
   auto scanner_result = scanner_builder.Finish();
   if (!scanner_result.ok()) {
@@ -185,16 +195,43 @@ void ArrowReader::batch_read(std::shared_ptr<arrow::dataset::Scanner> scanner,
   if (!scanner) {
     THROW_INVALID_ARGUMENT_EXCEPTION("Scanner is null");
   }
-  auto row_num_result = scanner->CountRows();
+  neug::MemTracer mem_tracer("batch_read");
+
   int64_t row_num = 0;
-  if (!row_num_result.ok()) {
-    LOG(WARNING) << "Failed to count rows via scanner: "
-                 << row_num_result.status().message();
-    THROW_IO_EXCEPTION("Failed to count rows via scanner: " +
-                       row_num_result.status().message());
+  // Experiment: test different CountRows strategies
+  const char* diag_mode = getenv("NEUG_COUNT_MODE");
+  if (diag_mode && std::string(diag_mode) == "skip") {
+    LOG(INFO) << "[DIAG] Skipping CountRows";
+    mem_tracer.checkpoint("skipped_CountRows");
+  } else if (diag_mode && std::string(diag_mode) == "skip_sleep") {
+    LOG(INFO) << "[DIAG] Skipping CountRows, sleeping 2s after ToRecordBatchReader";
+    mem_tracer.checkpoint("skipped_CountRows");
+  } else if (diag_mode && std::string(diag_mode) == "estimate") {
+    // Estimate row count from file size (avg ~40 bytes per row for this schema)
+    const auto& fileSchema = sharedState->schema.file;
+    if (!fileSchema.paths.empty()) {
+      auto fs_result = fileSystem->GetFileInfo(fileSchema.paths[0]);
+      if (fs_result.ok()) {
+        int64_t file_size = fs_result->size();
+        row_num = file_size / 40;  // rough estimate
+        LOG(INFO) << "[DIAG] Estimated row_num=" << row_num
+                  << " from file_size=" << file_size;
+      }
+    }
+    mem_tracer.checkpoint("after_estimate");
   } else {
-    VLOG(10) << "Row count from scanner: " << row_num_result.ValueOrDie();
-    row_num = row_num_result.ValueOrDie();
+    // Default: CountRows on same scanner
+    auto row_num_result = scanner->CountRows();
+    if (!row_num_result.ok()) {
+      LOG(WARNING) << "Failed to count rows via scanner: "
+                   << row_num_result.status().message();
+      THROW_IO_EXCEPTION("Failed to count rows via scanner: " +
+                         row_num_result.status().message());
+    } else {
+      VLOG(10) << "Row count from scanner: " << row_num_result.ValueOrDie();
+      row_num = row_num_result.ValueOrDie();
+    }
+    mem_tracer.checkpoint("after_CountRows");
   }
 
   auto batch_reader_result = scanner->ToRecordBatchReader();
@@ -205,6 +242,14 @@ void ArrowReader::batch_read(std::shared_ptr<arrow::dataset::Scanner> scanner,
                        batch_reader_result.status().message());
   }
   auto batch_reader = batch_reader_result.ValueOrDie();
+  mem_tracer.checkpoint("after_ToRecordBatchReader");
+
+  // Diagnostic: sleep to let async scanner finish reading
+  if (diag_mode && std::string(diag_mode) == "skip_sleep") {
+    LOG(INFO) << "[DIAG] Sleeping 2s to let async scanner finish...";
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    mem_tracer.checkpoint("after_sleep");
+  }
 
   auto batch_supplier = std::make_shared<neug::ArrowRecordBatchStreamSupplier>(
       batch_reader, row_num);
