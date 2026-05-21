@@ -15,6 +15,9 @@
 #pragma once
 
 #include <arrow/memory_pool.h>
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#endif
 
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/graph/vertex_timestamp.h"
@@ -300,23 +303,19 @@ class VertexTable {
     std::shared_mutex rw_mutex;
     int batch_idx = 0;
     double rss_before_batch = neug::GetCurrentRSSMB();
-    // Track per-batch RSS to measure if Arrow memory is bounded
-    std::vector<std::weak_ptr<arrow::RecordBatch>> batch_trackers;
-    double rss_prev_end = neug::GetCurrentRSSMB();
-    int64_t total_rows_inserted = 0;
-    // Track Arrow memory pool to distinguish allocator-level free vs OS-level free
     auto* pool = arrow::default_memory_pool();
     int64_t pool_before_loop = pool->bytes_allocated();
     while (true) {
-      int64_t pool_before_get = pool->bytes_allocated();
-      double rss_before_get = neug::GetCurrentRSSMB();
+      // Measurement point: right after GetNextBatch
+      // This is where the PREVIOUS batch's memory actually gets freed
+      // (SequencingGenerator overwrites previous_value, releasing old batch)
       auto batch = supplier->GetNextBatch();
       if (batch == nullptr) {
         break;
       }
+      // Measure here: previous batch freed + current batch allocated
       double rss_after_get = neug::GetCurrentRSSMB();
       int64_t pool_after_get = pool->bytes_allocated();
-      batch_trackers.push_back(batch);
 
       auto columns = batch->columns();
       const auto& property_names = vertex_schema_->property_names;
@@ -345,46 +344,26 @@ class VertexTable {
         set_properties_column(col, chunked_array, vids, rw_mutex);
       }
 
-      double rss_after_insert = neug::GetCurrentRSSMB();
-      int64_t pool_after_insert = pool->bytes_allocated();
-      // Release all Arrow references
+      // Don't reset batch here - let GetNextBatch handle the lifecycle
       columns.clear();
       pk_array.reset();
       batch.reset();
-      double rss_after_release = neug::GetCurrentRSSMB();
-      int64_t pool_after_release = pool->bytes_allocated();
 
-      total_rows_inserted += batch_rows;
-      // Count alive batches
-      int num_alive = 0;
-      for (auto& wk : batch_trackers) {
-        if (!wk.expired()) num_alive++;
-      }
-      // Log with Arrow pool stats
-      VLOG(1) << "[MemTrace:batch_mem] idx=" << batch_idx
-              << " rows=" << batch_rows
-              << " num_alive=" << num_alive
-              << " get_cost=" << (rss_after_get - rss_before_get)
-              << " insert_cost=" << (rss_after_insert - rss_after_get)
-              << " release_reclaimed=" << (rss_after_insert - rss_after_release)
-              << " pool_get_delta=" << (pool_after_get - pool_before_get)
-              << " pool_release_delta=" << (pool_after_insert - pool_after_release)
-              << " pool_total=" << pool_after_release
-              << " net_per_batch=" << (rss_after_release - rss_before_get)
-              << " total_RSS=" << rss_after_release
-              << " total_delta=" << (rss_after_release - rss_before_batch);
+      // Log: pool_MB = Arrow allocator-level memory (tracks real alloc/free)
+      //       RSS = OS-level resident memory
+      VLOG(1) << "[MemTrace:mem_curve] idx=" << batch_idx
+              << " pool_MB=" << (pool_after_get / 1048576.0)
+              << " RSS=" << rss_after_get
+              << " delta_RSS=" << (rss_after_get - rss_before_batch);
 
-      rss_prev_end = rss_after_release;
       batch_idx++;
     }
     int64_t pool_after_loop = pool->bytes_allocated();
-    VLOG(1) << "[MemTrace:insert_vertices_impl] total_batches=" << batch_idx
-            << " RSS_final=" << neug::GetCurrentRSSMB()
-            << " total_growth=" << (neug::GetCurrentRSSMB() - rss_before_batch)
-            << " pool_before=" << pool_before_loop
-            << " pool_after=" << pool_after_loop
-            << " pool_delta=" << (pool_after_loop - pool_before_loop)
-            << " MB";
+    VLOG(1) << "[MemTrace:mem_curve] END"
+            << " pool_MB=" << (pool_after_loop / 1048576.0)
+            << " RSS=" << neug::GetCurrentRSSMB()
+            << " delta_RSS=" << (neug::GetCurrentRSSMB() - rss_before_batch)
+            << " total_batches=" << batch_idx;
     mem_tracer.checkpoint("after_all_batches");
   }
 
