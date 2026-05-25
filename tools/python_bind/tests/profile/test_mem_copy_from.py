@@ -140,7 +140,7 @@ class TestMemCopyFrom:
         # Execute COPY FROM with batch_read
         query = (
             f'COPY vertex FROM "{csv_path}" '
-            f'(header=true, delimiter=",", batch_read=true, batch_size={batch_size}, parallel=false);'
+            f'(header=true, delimiter=",", batch_read=true, batch_size={batch_size}, ,);'
         )
         print(f"[4] Executing: {query}")
 
@@ -211,6 +211,69 @@ class TestMemCopyFrom:
         result = self._run_copy_from(csv_path, "640MB")
         print(f"\n>>> VERDICT: arrow_overhead={result['arrow_overhead_mb']:.1f} MB "
               f"({'ISSUE DETECTED' if result['arrow_overhead_mb'] > 40 else 'OK'})")
+
+    def test_copy_160mb_no_string(self):
+        """Profile COPY FROM with 160MB dataset, no STRING columns."""
+        csv_path = os.path.join(DATA_DIR, "vertices_nostr_160mb.csv")
+        if not os.path.exists(csv_path):
+            from tests.profile.gen_test_data import generate_csv_no_string
+            os.makedirs(DATA_DIR, exist_ok=True)
+            generate_csv_no_string(csv_path, 160)
+
+        db_dir = os.path.join(DB_BASE_DIR, "db_160MB_nostr")
+        shutil.rmtree(db_dir, ignore_errors=True)
+
+        file_size_mb = os.path.getsize(csv_path) / (1024 * 1024)
+        print(f"\n{'='*60}")
+        print(f"Test: 160MB NO STRING (file={file_size_mb:.1f} MB)")
+        print(f"{'='*60}")
+
+        rss_before = get_current_rss_mb()
+        print(f"[1] Before: RSS={rss_before:.1f} MB")
+
+        db = Database(db_dir, "w")
+        conn = db.connect()
+
+        conn.execute(
+            "CREATE NODE TABLE vertex("
+            "id INT64, age INT64, score DOUBLE, value INT64, "
+            "PRIMARY KEY(id));"
+        )
+
+        rss_after_schema = get_current_rss_mb()
+        print(f"[2] After schema: RSS={rss_after_schema:.1f} MB")
+
+        query = (
+            f'COPY vertex FROM "{csv_path}" '
+            f'(header=true, delimiter=",", batch_read=true, batch_size=1048576, parallel=false);'
+        )
+        print(f"[3] Executing: {query}")
+
+        t0 = time.time()
+        conn.execute(query)
+        elapsed = time.time() - t0
+
+        rss_after_copy = get_current_rss_mb()
+        total_growth = rss_after_copy - rss_after_schema
+        print(f"[4] After COPY: RSS={rss_after_copy:.1f} MB "
+              f"(delta={total_growth:.1f} MB, time={elapsed:.2f}s)")
+
+        result = list(conn.execute("MATCH (n:vertex) RETURN count(n);"))
+        row_count = result[0][0] if result else 0
+        print(f"[5] Loaded {row_count} vertices")
+
+        # No STRING: storage = id(8) + age(8) + score(8) + value(8) = 32B/row
+        expected_storage_mb = row_count * 32 / (1024 * 1024)
+        arrow_overhead = total_growth - expected_storage_mb
+        print(f"[6] Expected storage ~{expected_storage_mb:.1f} MB")
+        print(f"[7] Arrow overhead: ~{arrow_overhead:.1f} MB")
+        print(f"[8] Ratio (growth/file): {total_growth / file_size_mb:.2f}x")
+
+        del conn
+        del db
+        shutil.rmtree(db_dir, ignore_errors=True)
+
+        print(f"\n>>> Compare with STRING version to isolate STRING allocation impact")
 
     def test_summary(self):
         """Run all sizes and produce summary report."""

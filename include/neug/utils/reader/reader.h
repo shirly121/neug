@@ -239,6 +239,7 @@ class ArrowReader : public Reader<arrow::fs::FileSystem> {
                  execution::Context& output);
   void batch_read(std::shared_ptr<arrow::dataset::Scanner>,
                   execution::Context& output);
+  void streaming_read(execution::Context& output);
 
  protected:
   std::unique_ptr<ArrowOptionsBuilder> optionsBuilder;

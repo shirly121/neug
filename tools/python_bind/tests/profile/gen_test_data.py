@@ -39,6 +39,30 @@ def generate_csv(output_path, target_size_mb):
     return row_id
 
 
+def generate_csv_no_string(output_path, target_size_mb):
+    """Generate a CSV file without STRING columns (only INT64/DOUBLE)."""
+    target_bytes = target_size_mb * 1024 * 1024
+    header = "id,age,score,value\n"
+
+    written = 0
+    row_id = 0
+    with open(output_path, "w") as f:
+        f.write(header)
+        written += len(header)
+        while written < target_bytes:
+            age = random.randint(18, 80)
+            score = round(random.uniform(0.0, 100.0), 4)
+            value = random.randint(1, 1000000)
+            line = f"{row_id},{age},{score},{value}\n"
+            f.write(line)
+            written += len(line)
+            row_id += 1
+
+    actual_mb = os.path.getsize(output_path) / (1024 * 1024)
+    print(f"Generated {output_path}: {actual_mb:.1f} MB, {row_id} rows (no string)")
+    return row_id
+
+
 def main():
     data_dir = os.path.join(os.path.dirname(__file__), "data")
     os.makedirs(data_dir, exist_ok=True)
@@ -50,6 +74,15 @@ def main():
             print(f"Already exists: {output_path} ({actual_mb:.1f} MB)")
             continue
         generate_csv(output_path, size_mb)
+
+    # Generate no-string variants
+    for size_mb in [160]:
+        output_path = os.path.join(data_dir, f"vertices_nostr_{size_mb}mb.csv")
+        if os.path.exists(output_path):
+            actual_mb = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"Already exists: {output_path} ({actual_mb:.1f} MB)")
+            continue
+        generate_csv_no_string(output_path, size_mb)
 
 
 if __name__ == "__main__":

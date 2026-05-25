@@ -144,6 +144,12 @@ struct CSVReadFunction {
     externalSchema.entry = std::make_shared<reader::TableEntrySchema>();
     externalSchema.file = schema;
     validateAndConvertSniffOptions(externalSchema.file);
+    // Force a small block_size for schema inference to avoid Arrow pool leak
+    // proportional to block_size. The user's batch_size is only needed for
+    // actual data reading, not for inferring column types.
+    static constexpr int64_t kSniffBlockSize = 1 << 20;  // 1 MB
+    externalSchema.file.options["BATCH_SIZE"] =
+        std::to_string(kSniffBlockSize);
     const auto& vfs = neug::main::MetadataRegistry::getVFS();
     const auto& fs = vfs->Provide(state->schema.file);
     auto resolvedPaths = std::vector<std::string>();
@@ -172,7 +178,12 @@ struct CSVReadFunction {
     if (hasHeader) {
       options.insert({"SKIP_ROWS", "1"});
       options.insert({"AUTOGENERATE_COLUMN_NAMES", "TRUE"});
-      sniffResult = sniffer->sniff();
+      auto optionsBuilder2 =
+          std::make_unique<reader::ArrowCsvOptionsBuilder>(state);
+      auto reader2 = std::make_shared<reader::ArrowReader>(
+          state, std::move(optionsBuilder2), fs->toArrowFileSystem());
+      auto sniffer2 = std::make_shared<reader::ArrowSniffer>(reader2);
+      sniffResult = sniffer2->sniff();
       if (sniffResult) {
         return sniffResult.value();
       }

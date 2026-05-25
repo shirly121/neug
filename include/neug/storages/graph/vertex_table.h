@@ -284,8 +284,9 @@ class VertexTable {
 
   template <typename PK_T>
   void insert_vertices_impl(std::shared_ptr<IRecordBatchSupplier> supplier) {
-    LOG(INFO) << "start to insert vertices";
+    double rss_before_count = neug::GetCurrentRSSMB();
     auto row_nums = supplier->RowNum();
+    double rss_after_count = neug::GetCurrentRSSMB();
     if (row_nums <= 0) {
       LOG(WARNING) << "Row number from supplier is negative, treat it as 0.";
       row_nums = 0;
@@ -298,8 +299,6 @@ class VertexTable {
       }
       EnsureCapacity(cap);
     }
-    neug::MemTracer mem_tracer("insert_vertices_impl");
-    mem_tracer.checkpoint("after_EnsureCapacity");
     std::shared_mutex rw_mutex;
     int batch_idx = 0;
     double rss_before_batch = neug::GetCurrentRSSMB();
@@ -354,7 +353,8 @@ class VertexTable {
       VLOG(1) << "[MemTrace:mem_curve] idx=" << batch_idx
               << " pool_MB=" << (pool_after_get / 1048576.0)
               << " RSS=" << rss_after_get
-              << " delta_RSS=" << (rss_after_get - rss_before_batch);
+              << " delta_RSS=" << (rss_after_get - rss_before_batch)
+              << " batch_rows=" << batch_rows;
 
       batch_idx++;
     }
@@ -363,8 +363,12 @@ class VertexTable {
             << " pool_MB=" << (pool_after_loop / 1048576.0)
             << " RSS=" << neug::GetCurrentRSSMB()
             << " delta_RSS=" << (neug::GetCurrentRSSMB() - rss_before_batch)
-            << " total_batches=" << batch_idx;
-    mem_tracer.checkpoint("after_all_batches");
+            << " total_batches=" << batch_idx
+            << " pool_before_loop=" << (pool_before_loop / 1048576.0)
+            << " rss_before_count=" << rss_before_count
+            << " rss_after_count=" << rss_after_count
+            << " rss_before_batch=" << rss_before_batch
+            << " rows_num=" << row_nums;
   }
 
   IndexerType indexer_;
