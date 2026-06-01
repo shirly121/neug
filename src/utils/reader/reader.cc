@@ -238,6 +238,139 @@ void ArrowReader::batch_read(std::shared_ptr<arrow::dataset::Scanner> scanner,
       }
     }
     mem_tracer.checkpoint("after_estimate");
+  } else if (diag_mode && std::string(diag_mode) == "streaming") {
+    // Count rows using StreamingReader with small block_size and single column
+    // This avoids the large decode buffer allocation of scanner->CountRows()
+    const auto& fileSchema = sharedState->schema.file;
+    if (fileSchema.paths.empty()) {
+      THROW_INVALID_ARGUMENT_EXCEPTION("No file paths for streaming count");
+    }
+
+    auto arrowOptions = optionsBuilder->build();
+    auto fragmentOpts = arrowOptions.scanOptions->fragment_scan_options;
+    auto csvFragmentOpts =
+        std::dynamic_pointer_cast<arrow::dataset::CsvFragmentScanOptions>(
+            fragmentOpts);
+    if (!csvFragmentOpts) {
+      THROW_INVALID_ARGUMENT_EXCEPTION(
+          "Failed to get CsvFragmentScanOptions for streaming count");
+    }
+
+    // Use small block_size (1MB) for counting to minimize memory
+    auto read_options = csvFragmentOpts->read_options;
+    read_options.block_size = 1 << 20;  // 1MB fixed
+
+    auto parse_options = csvFragmentOpts->parse_options;
+
+    // Only decode the first column to minimize CPU and memory
+    auto convert_options = csvFragmentOpts->convert_options;
+    if (!convert_options.include_columns.empty()) {
+      convert_options.include_columns = {convert_options.include_columns[0]};
+    } else if (!read_options.column_names.empty()) {
+      convert_options.include_columns = {read_options.column_names[0]};
+    }
+
+    auto file_result = arrow::io::ReadableFile::Open(fileSchema.paths[0]);
+    if (!file_result.ok()) {
+      THROW_IO_EXCEPTION("Failed to open file for streaming count: " +
+                         file_result.status().message());
+    }
+    auto input_file = file_result.ValueOrDie();
+
+    auto reader_result = arrow::csv::StreamingReader::Make(
+        arrow::io::default_io_context(), input_file, read_options,
+        parse_options, convert_options);
+    if (!reader_result.ok()) {
+      THROW_IO_EXCEPTION("Failed to create StreamingReader for count: " +
+                         reader_result.status().message());
+    }
+    auto count_reader = reader_result.ValueOrDie();
+
+    row_num = 0;
+    while (true) {
+      auto batch_result = count_reader->Next();
+      if (!batch_result.ok() || *batch_result == nullptr) {
+        break;
+      }
+      row_num += (*batch_result)->num_rows();
+    }
+    LOG(INFO) << "[DIAG] StreamingReader counted row_num=" << row_num;
+    mem_tracer.checkpoint("after_CountRows");
+  } else if (diag_mode && std::string(diag_mode) == "scanner_1mb") {
+    // Use DatasetScanner CountRows() but with block_size forced to 1MB
+    // This tests whether limiting block_size alone (without switching to
+    // StreamingReader) is sufficient to bound countRows memory.
+    LOG(INFO) << "[DIAG] CountRows via DatasetScanner with block_size=1MB";
+
+    // Build a separate scanner with block_size=1MB for counting
+    auto arrowOptions = optionsBuilder->build();
+    if (!arrowOptions.scanOptions) {
+      THROW_INVALID_ARGUMENT_EXCEPTION(
+          "Failed to build arrow options for scanner_1mb");
+    }
+
+    // Override block_size in fragment scan options
+    auto fragmentOpts = arrowOptions.scanOptions->fragment_scan_options;
+    auto csvFragmentOpts =
+        std::dynamic_pointer_cast<arrow::dataset::CsvFragmentScanOptions>(
+            fragmentOpts);
+    if (csvFragmentOpts) {
+      csvFragmentOpts->read_options.block_size = 1 << 20;  // 1MB
+      LOG(INFO) << "[DIAG] Overriding block_size to 1MB for countRows scanner";
+    }
+
+    // Rebuild scanner with modified options
+    auto scan_opts = arrowOptions.scanOptions;
+    auto fileFormat = arrowOptions.fileFormat;
+    if (!fileFormat) {
+      THROW_INVALID_ARGUMENT_EXCEPTION(
+          "File format is null for scanner_1mb mode");
+    }
+
+    auto factory =
+        datasetBuilder->buildFactory(sharedState, fileSystem, fileFormat);
+
+    arrow::Result<std::shared_ptr<arrow::dataset::Dataset>> dataset_result;
+    if (scan_opts->dataset_schema) {
+      dataset_result = factory->Finish(scan_opts->dataset_schema);
+    } else {
+      arrow::dataset::FinishOptions finish_options;
+      finish_options.validate_fragments = false;
+      dataset_result = factory->Finish(finish_options);
+    }
+    if (!dataset_result.ok()) {
+      THROW_IO_EXCEPTION("Failed to create dataset for scanner_1mb: " +
+                         dataset_result.status().message());
+    }
+    auto dataset = dataset_result.ValueOrDie();
+
+    arrow::dataset::ScannerBuilder count_scanner_builder(dataset, scan_opts);
+    auto count_scanner_result = count_scanner_builder.Finish();
+    if (!count_scanner_result.ok()) {
+      THROW_IO_EXCEPTION("Failed to create scanner for scanner_1mb: " +
+                         count_scanner_result.status().message());
+    }
+    auto count_scanner = count_scanner_result.ValueOrDie();
+
+    auto* pool = arrow::default_memory_pool();
+    int64_t pool_before_count = pool->bytes_allocated();
+    LOG(INFO) << "[DIAG] scanner_1mb pool_before_CountRows="
+              << (pool_before_count / 1048576.0) << " MB";
+
+    auto row_num_result = count_scanner->CountRows();
+    if (!row_num_result.ok()) {
+      THROW_IO_EXCEPTION("Failed to count rows via scanner_1mb: " +
+                         row_num_result.status().message());
+    }
+    row_num = row_num_result.ValueOrDie();
+
+    int64_t pool_after_count = pool->bytes_allocated();
+    LOG(INFO) << "[DIAG] scanner_1mb pool_after_CountRows="
+              << (pool_after_count / 1048576.0)
+              << " MB, delta=" << ((pool_after_count - pool_before_count) / 1048576.0)
+              << " MB";
+    LOG(INFO) << "[DIAG] scanner_1mb counted row_num=" << row_num;
+    mem_tracer.checkpoint("after_CountRows");
   } else {
     // Default: CountRows on same scanner
     auto row_num_result = scanner->CountRows();
@@ -263,12 +396,21 @@ void ArrowReader::batch_read(std::shared_ptr<arrow::dataset::Scanner> scanner,
   auto batch_reader = batch_reader_result.ValueOrDie();
   mem_tracer.checkpoint("after_ToRecordBatchReader");
 
-  // Diagnostic: sleep to let async scanner finish reading
-  if (diag_mode && std::string(diag_mode) == "skip_sleep") {
-    LOG(INFO) << "[DIAG] Sleeping 2s to let async scanner finish...";
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-    mem_tracer.checkpoint("after_sleep");
-  }
+  // // Diagnostic: sleep to let async scanner finish reading/freeing
+  // const char* sleep_mode = getenv("NEUG_SLEEP_AFTER_SCANNER");
+  // if ((diag_mode && std::string(diag_mode) == "skip_sleep") || sleep_mode) {
+  //   int sleep_secs = sleep_mode ? std::atoi(sleep_mode) : 2;
+  //   if (sleep_secs <= 0) sleep_secs = 2;
+  //   auto* pool = arrow::default_memory_pool();
+  //   LOG(INFO) << "[DIAG] pool_before_sleep=" << (pool->bytes_allocated() / 1048576.0)
+  //             << " MB";
+  //   LOG(INFO) << "[DIAG] Sleeping " << sleep_secs
+  //             << "s to let async scanner finish...";
+  //   std::this_thread::sleep_for(std::chrono::seconds(sleep_secs));
+  //   LOG(INFO) << "[DIAG] pool_after_sleep=" << (pool->bytes_allocated() / 1048576.0)
+  //             << " MB";
+  //   mem_tracer.checkpoint("after_sleep");
+  // }
 
   auto batch_supplier = std::make_shared<neug::ArrowRecordBatchStreamSupplier>(
       batch_reader, row_num);
