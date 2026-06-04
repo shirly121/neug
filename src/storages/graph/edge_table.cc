@@ -991,7 +991,7 @@ void EdgeTable::dropAndCreateNewBundledCSR(
         CreateColumn(DataTypeId::kUInt64));
     auto row_id_col = std::dynamic_pointer_cast<ULongColumn>(row_id_col_base);
     row_id_col->Open(ckp, ModuleDescriptor(), MemoryLevel::kInMemory);
-    auto edges = out_csr_->batch_export(row_id_col);
+    auto edges = out_csr_->batch_export(row_id_col.get());
     std::vector<Property> remaining_data;
     remaining_data.reserve(row_id_col->size());
     for (size_t i = 0; i < row_id_col->size(); ++i) {
@@ -1042,7 +1042,7 @@ void EdgeTable::dropAndCreateNewUnbundledCSR(Checkpoint& ckp,
     capacity_.store(0);
   }
 
-  auto edges = out_csr_->batch_export(prev_data_col);
+  auto edges = out_csr_->batch_export(prev_data_col.get());
   auto prop_defaults = meta_->get_default_properties();
   if (prev_data_col && prev_data_col->size() > 0) {
     table_->resize(prev_data_col->size(), prop_defaults);
