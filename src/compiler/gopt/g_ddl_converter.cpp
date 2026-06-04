@@ -765,5 +765,40 @@ bool GDDLConverter::checkEntryType(const std::string& labelName,
   return entry->getType() == expectedType;
 }
 
+void GDDLConverter::convertCreateIndex(const planner::LogicalCreateIndex& op,
+                                       ::physical::PhysicalPlan* plan) {
+  const auto& info = op.getInfo();
+
+  auto physical_opr = std::make_unique<::physical::PhysicalOpr>();
+  auto* create_index = physical_opr->mutable_opr()->mutable_create_index();
+
+  // Set index name
+  create_index->set_name(info.indexName);
+
+  // Set vertex type
+  auto* vertex_type = create_index->mutable_vertex_type();
+  vertex_type->set_name(info.tableName);
+
+  // Set index type
+  create_index->set_index_type(info.indexType);
+
+  // Set properties
+  for (const auto& prop : info.propertyNames) {
+    create_index->add_properties(prop);
+  }
+
+  // Set options
+  for (const auto& [key, value] : info.options) {
+    (*create_index->mutable_options())[key] = value;
+  }
+
+  // Set conflict action
+  create_index->set_conflict_action(info.ifNotExists
+                                        ? ::physical::ON_CONFLICT_DO_NOTHING
+                                        : ::physical::ON_CONFLICT_THROW);
+
+  plan->mutable_plan()->AddAllocated(physical_opr.release());
+}
+
 }  // namespace gopt
 }  // namespace neug

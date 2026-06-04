@@ -1,0 +1,112 @@
+/** Copyright 2020 Alibaba Group Holding Limited.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "neug/storages/index/doc_id_map.h"
+
+#include <cstring>
+#include <string>
+
+#include "neug/storages/checkpoint.h"
+#include "neug/storages/container/anon_mmap_container.h"
+
+namespace neug {
+
+void DocIDMap::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
+                    MemoryLevel level) {
+  auto next_doc_id_str = descriptor.get("next_doc_id");
+  if (next_doc_id_str.has_value()) {
+    next_doc_id_.store(
+        static_cast<doc_id_t>(std::stoull(next_doc_id_str.value())),
+        std::memory_order_relaxed);
+  }
+
+  auto path = descriptor.get_path("buffer");
+  if (path.has_value() && !path->empty()) {
+    buffer_ = ckp.OpenFile(*path, level);
+  } else {
+    buffer_ =
+        ckp.CreateRuntimeContainer(kDefaultCapacity * sizeof(vid_t), level);
+  }
+}
+
+ModuleDescriptor DocIDMap::Dump(Checkpoint& ckp) {
+  ModuleDescriptor desc;
+  desc.module_type = "doc_id_map";
+  desc.set("next_doc_id",
+           std::to_string(next_doc_id_.load(std::memory_order_relaxed)));
+  desc.set_path("buffer", ckp.Commit(*buffer_));
+  return desc;
+}
+
+doc_id_t DocIDMap::Insert(vid_t vid) {
+  doc_id_t new_id = next_doc_id_.fetch_add(1, std::memory_order_relaxed);
+  if (new_id >= capacity()) {
+    Resize(std::max(capacity() * 2, static_cast<size_t>(kDefaultCapacity)));
+  }
+  auto* data = static_cast<vid_t*>(buffer_->GetData());
+  data[new_id] = vid;
+  return new_id;
+}
+
+void DocIDMap::Erase(vid_t vid) {
+  auto* data = static_cast<vid_t*>(buffer_->GetData());
+  size_t n = next_doc_id_.load(std::memory_order_relaxed);
+  for (size_t i = 0; i < n; ++i) {
+    if (data[i] == vid) {
+      data[i] = INVALID_VID;
+      return;
+    }
+  }
+}
+
+vid_t DocIDMap::GetVID(doc_id_t doc_id) const {
+  if (doc_id >= next_doc_id_.load(std::memory_order_relaxed)) {
+    return INVALID_VID;
+  }
+  auto* data = static_cast<const vid_t*>(buffer_->GetData());
+  return data[doc_id];
+}
+
+std::unique_ptr<DocIDMap> DocIDMap::Fork(Checkpoint& ckp) const {
+  auto forked = std::make_unique<DocIDMap>();
+  size_t n = next_doc_id_.load(std::memory_order_relaxed);
+  size_t data_size = std::max(n, kDefaultCapacity) * sizeof(vid_t);
+
+  forked->buffer_ =
+      ckp.CreateRuntimeContainer(data_size, MemoryLevel::kInMemory);
+  if (n > 0 && buffer_) {
+    std::memcpy(forked->buffer_->GetData(), buffer_->GetData(),
+                n * sizeof(vid_t));
+  }
+  forked->next_doc_id_.store(static_cast<doc_id_t>(n),
+                             std::memory_order_relaxed);
+  return forked;
+}
+
+void DocIDMap::Resize(size_t new_capacity) {
+  if (new_capacity <= capacity()) {
+    return;
+  }
+  if (!buffer_) {
+    // No buffer yet — create an anonymous mmap container
+    auto anon = std::make_unique<AnonMMap>();
+    anon->OpenAnonymous(new_capacity * sizeof(vid_t));
+    buffer_ = std::move(anon);
+  } else {
+    buffer_->Resize(new_capacity * sizeof(vid_t));
+  }
+}
+
+}  // namespace neug

@@ -377,6 +377,9 @@ message PhysicalOpr {
       ExtensionInstall ext_install = 72;
       ExtensionLoad ext_load = 73;
       ExtensionUninstall ext_uninstall = 74;
+
+      // Index operators
+      CreateIndexOpr create_index = 75;
     }
   }
   message MetaData {

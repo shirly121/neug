@@ -61,6 +61,7 @@
 #include "neug/execution/execute/ops/ddl/add_edge_property.h"
 #include "neug/execution/execute/ops/ddl/add_vertex_property.h"
 #include "neug/execution/execute/ops/ddl/create_edge_type.h"
+#include "neug/execution/execute/ops/ddl/create_index.h"
 #include "neug/execution/execute/ops/ddl/create_vertex_type.h"
 #include "neug/execution/execute/ops/ddl/drop_edge_property.h"
 #include "neug/execution/execute/ops/ddl/drop_edge_type.h"
@@ -141,6 +142,7 @@ void PlanParser::init() {
   register_operator_builder(
       std::make_unique<ops::CreateVertexTypeOprBuilder>());
   register_operator_builder(std::make_unique<ops::CreateEdgeTypeOprBuilder>());
+  register_operator_builder(std::make_unique<ops::CreateIndexOprBuilder>());
   register_operator_builder(
       std::make_unique<ops::AddVertexPropertySchemaOprBuilder>());
   register_operator_builder(

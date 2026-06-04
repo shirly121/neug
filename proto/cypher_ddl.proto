@@ -143,3 +143,20 @@ message RenameEdgeTypeSchema {
     EdgeType new_type = 2;
     ConflictAction conflict_action = 3;
 }
+
+// Example:
+// CREATE INDEX vec_hnsw_index ON vector_node USING HNSW (vec) WITH (metric = 'cosine');
+message CreateIndexOpr {
+    // Unique index name
+    string name = 1;
+    // Vertex type the index is bound to
+    common.NameOrId vertex_type = 2;
+    // Index algorithm type: "HNSW", "IVF", etc.
+    string index_type = 3;
+    // Property names to index
+    repeated string properties = 4;
+    // WITH clause options (metric, m, ef_construction, ...)
+    map<string, string> options = 5;
+    // Conflict handling
+    ConflictAction conflict_action = 6;
+}

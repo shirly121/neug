@@ -1,0 +1,89 @@
+/** Copyright 2020 Alibaba Group Holding Limited.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "neug/storages/checkpoint.h"
+#include "neug/storages/checkpoint_manifest.h"
+#include "neug/storages/index/i_index.h"
+#include "neug/utils/result.h"
+
+namespace neug {
+
+/**
+ * @brief Manages all index instances in the storage layer.
+ *
+ * IndexManager owns a map of named indexes and provides lifecycle operations
+ * (Open/Dump) that integrate with the Checkpoint framework.
+ * Supports COW via Fork() for transaction isolation.
+ */
+class IndexManager {
+ public:
+  IndexManager() = default;
+  ~IndexManager() = default;
+
+  /**
+   * @brief Create a new index and register it.
+   * @param name Unique index name.
+   * @param meta Index metadata.
+   * @return Pointer to the created index, or error.
+   */
+  neug::result<Index*> CreateIndex(const std::string& name,
+                                   const IndexMeta& meta);
+
+  /**
+   * @brief Remove an index by name.
+   */
+  Status DropIndex(const std::string& name);
+
+  /**
+   * @brief Find indexes matching a label and property names.
+   */
+  Status GetIndex(const std::string& label_name,
+                  const std::vector<std::string>& property_names,
+                  std::vector<Index*>& target_indexes);
+
+  /**
+   * @brief Get all registered indexes.
+   */
+  Status GetAllIndexes(std::vector<Index*>& target_indexes);
+
+  /**
+   * @brief Restore all indexes from a checkpoint manifest.
+   */
+  void Open(Checkpoint& ckp, const CheckpointManifest& meta, MemoryLevel level);
+
+  /**
+   * @brief Persist all indexes to a checkpoint manifest.
+   */
+  void Dump(Checkpoint& ckp, CheckpointManifest& meta);
+
+  /**
+   * @brief COW: Fork each Index (shallow copy).
+   */
+  std::shared_ptr<IndexManager> Fork() const;
+
+  const auto& GetAllIndexEntries() const { return indexes_; }
+
+ private:
+  std::unordered_map<std::string, std::shared_ptr<Index>> indexes_;
+};
+
+}  // namespace neug

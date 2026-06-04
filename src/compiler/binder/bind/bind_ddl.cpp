@@ -22,6 +22,7 @@
 
 #include "neug/compiler/binder/binder.h"
 #include "neug/compiler/binder/ddl/bound_alter.h"
+#include "neug/compiler/binder/ddl/bound_create_index.h"
 #include "neug/compiler/binder/ddl/bound_create_sequence.h"
 #include "neug/compiler/binder/ddl/bound_create_table.h"
 #include "neug/compiler/binder/ddl/bound_create_type.h"
@@ -40,6 +41,7 @@
 #include "neug/compiler/function/sequence/sequence_functions.h"
 #include "neug/compiler/main/client_context.h"
 #include "neug/compiler/parser/ddl/alter.h"
+#include "neug/compiler/parser/ddl/create_index.h"
 #include "neug/compiler/parser/ddl/create_sequence.h"
 #include "neug/compiler/parser/ddl/create_table.h"
 #include "neug/compiler/parser/ddl/create_table_info.h"
@@ -403,6 +405,12 @@ std::unique_ptr<BoundStatement> Binder::bindCreateSequence(
       sequenceName, startWith, increment, minValue, maxValue, info.cycle,
       info.onConflict, false /* isInternal */);
   return std::make_unique<BoundCreateSequence>(std::move(boundInfo));
+}
+
+std::unique_ptr<BoundStatement> Binder::bindCreateIndex(
+    const Statement& statement) {
+  auto& createIndex = statement.constCast<CreateIndex>();
+  return std::make_unique<BoundCreateIndex>(createIndex.getInfo());
 }
 
 std::unique_ptr<BoundStatement> Binder::bindDrop(const Statement& statement) {

@@ -2,6 +2,7 @@ add_neug_test(
 	gopt_test
 	# join_test.cpp
 	# ddl_test.cpp
+	create_index_test.cpp
 	dml_test.cpp
 	pattern_test.cpp
 	ldbc_test.cpp

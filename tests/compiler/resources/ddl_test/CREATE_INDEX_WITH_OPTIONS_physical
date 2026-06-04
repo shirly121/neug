@@ -1,0 +1,1 @@
+{"plan":[{"opr":{"create_index":{"name":"vec_hnsw_index","vertex_type":{"name":"User"},"index_type":"HNSW","properties":["age"],"options":{"metric":"cosine"},"conflict_action":"ON_CONFLICT_THROW"}},"meta_data":[]}]}

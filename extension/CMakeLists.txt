@@ -131,5 +131,7 @@ endfunction()
 add_extension_if_enabled("parquet")
 # Add httpfs extension (S3/OSS + HTTP/HTTPS)
 add_extension_if_enabled("httpfs")
+# Add zvec extension (vector index: HNSW)
+add_extension_if_enabled("zvec")
 
 message(STATUS "=== Extension configuration complete ===")
