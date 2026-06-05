@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <string>
 
 #include "neug/storages/container/i_container.h"
@@ -58,12 +59,8 @@ class ZVecDumpContainer : public IDataContainer {
   }
 
   void Dump(const std::string& new_path) override {
-    if (zvec_index_) {
-      zvec_index_->Flush();
-    }
-    // After Flush, the data is already at runtime_path_.
-    // If new_path != runtime_path_, the checkpoint framework handles
-    // the file copy/link via CommitToSnapshot.
+    Sync();
+    std::filesystem::rename(runtime_path_, new_path);
   }
 
   bool IsDirty() override {

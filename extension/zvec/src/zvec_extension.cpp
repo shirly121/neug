@@ -17,6 +17,7 @@
 
 #include "neug/compiler/extension/extension_api.h"
 #include "neug/storages/index/index_factory.h"
+#include "neug/storages/module/module_factory.h"
 #include "neug/utils/exception/exception.h"
 
 #include "hnsw_index.h"
@@ -76,6 +77,11 @@ static void RegisterHNSWIndex() {
 
   neug::IndexFactory::Instance().RegisterCreator("hnsw_index", creator);
   neug::IndexFactory::Instance().RegisterCreator("HNSW", creator);
+
+  // Register with ModuleFactory so ModuleBroker can restore from checkpoint
+  neug::ModuleFactory::instance().Register("hnsw_index", [] {
+    return std::make_unique<neug::extension::zvec_ext::HNSWIndex>();
+  });
 
   LOG(INFO) << "[zvec extension] Registered HNSW index type";
 }

@@ -32,13 +32,8 @@ void DocIDMap::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
         std::memory_order_relaxed);
   }
 
-  auto path = descriptor.get_path("buffer");
-  if (path.has_value() && !path->empty()) {
-    buffer_ = ckp.OpenFile(*path, level);
-  } else {
-    buffer_ =
-        ckp.CreateRuntimeContainer(kDefaultCapacity * sizeof(vid_t), level);
-  }
+  auto path = descriptor.get_path("doc_id_buffer").value_or("");
+  buffer_ = ckp.OpenFile(path, level);
 }
 
 ModuleDescriptor DocIDMap::Dump(Checkpoint& ckp) {
@@ -46,7 +41,7 @@ ModuleDescriptor DocIDMap::Dump(Checkpoint& ckp) {
   desc.module_type = "doc_id_map";
   desc.set("next_doc_id",
            std::to_string(next_doc_id_.load(std::memory_order_relaxed)));
-  desc.set_path("buffer", ckp.Commit(*buffer_));
+  desc.set_path("doc_id_buffer", ckp.Commit(*buffer_));
   return desc;
 }
 

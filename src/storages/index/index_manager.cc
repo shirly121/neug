@@ -22,7 +22,6 @@
 namespace neug {
 
 static constexpr const char* kIndexPrefix = "index_";
-static constexpr const char* kDocIdMapSuffix = "/doc_id_map";
 
 neug::result<Index*> IndexManager::CreateIndex(const std::string& name,
                                                const IndexMeta& meta) {
@@ -94,36 +93,17 @@ Status IndexManager::GetAllIndexes(std::vector<Index*>& target_indexes) {
   return Status::OK();
 }
 
-void IndexManager::Open(Checkpoint& ckp, const CheckpointManifest& meta,
-                        MemoryLevel level) {
+void IndexManager::Open(Checkpoint& ckp, ModuleBroker& store,
+                        const CheckpointManifest& meta, MemoryLevel level) {
   for (const auto& [key, desc] : meta.modules()) {
-    // Match keys with "index_" prefix but not "/doc_id_map" suffix
-    if (key.substr(0, strlen(kIndexPrefix)) != kIndexPrefix) {
-      continue;
-    }
-    if (key.find(kDocIdMapSuffix) != std::string::npos) {
+    if (!IsIndexModule(key)) {
       continue;
     }
 
-    auto index = IndexFactory::Instance().Create(desc.module_type, desc);
+    auto index = store.TakeModule<Index>(key, false);
     if (!index) {
-      LOG(WARNING) << "Unknown index type in manifest: " << desc.module_type
-                   << " (key=" << key << ")";
+      LOG(WARNING) << "Index module not found in broker: " << key;
       continue;
-    }
-
-    // Look for the corresponding doc_id_map descriptor
-    std::string doc_id_map_key = key + kDocIdMapSuffix;
-    auto doc_id_map_desc = meta.module(doc_id_map_key);
-
-    // Open the index - it will handle its own doc_id_map internally
-    index->Open(ckp, desc, level);
-
-    // If there's a separate doc_id_map descriptor, open it
-    if (doc_id_map_desc.has_value()) {
-      // The doc_id_map is managed by the Index itself via its protected member.
-      // We pass the descriptor info through the index's own descriptor.
-      // The Index::Open implementation is responsible for opening its DocIDMap.
     }
 
     indexes_[key] = std::shared_ptr<Index>(index.release());
@@ -138,8 +118,18 @@ void IndexManager::Dump(Checkpoint& ckp, CheckpointManifest& meta) {
       continue;
 
     auto desc = index->Dump(ckp);
-    meta.set_module(name, std::move(desc));
+    std::string key = GetKey(index->GetMeta().name);
+    meta.set_module(key, std::move(desc));
   }
+}
+
+bool IndexManager::IsIndexModule(const std::string& name) {
+  return name.size() > strlen(kIndexPrefix) &&
+         name.substr(0, strlen(kIndexPrefix)) == kIndexPrefix;
+}
+
+std::string IndexManager::GetKey(const std::string& index_name) {
+  return std::string(kIndexPrefix) + index_name;
 }
 
 std::shared_ptr<IndexManager> IndexManager::Fork() const {

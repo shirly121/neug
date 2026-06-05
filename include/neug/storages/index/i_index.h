@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include <rapidjson/document.h>
+
 #include "neug/common/types.h"
 #include "neug/compiler/common/case_insensitive_map.h"
 #include "neug/storages/index/doc_id_map.h"
@@ -44,12 +46,18 @@ struct LabelEntry {
   label_t src_label_id = 0;
   std::string dst_label_name;
   label_t dst_label_id = 0;
+
+  rapidjson::Value ToJson(rapidjson::Document::AllocatorType& alloc) const;
+  static LabelEntry FromJson(const rapidjson::Value& obj);
 };
 
 struct IndexBindSchema {
   LabelEntry label;
   std::vector<std::string> property_names;
   std::vector<DataType> property_types;
+
+  rapidjson::Value ToJson(rapidjson::Document::AllocatorType& alloc) const;
+  static IndexBindSchema FromJson(const rapidjson::Value& obj);
 };
 
 struct IndexMeta {
@@ -57,6 +65,9 @@ struct IndexMeta {
   std::string type;
   IndexBindSchema schema;
   common::case_insensitive_map_t<std::string> options;
+
+  std::string ToJsonString() const;
+  static IndexMeta FromJsonString(const std::string& json_str);
 };
 
 // --- Query/filter parameter types ---
@@ -91,6 +102,9 @@ class Index : public Module {
   ~Index() override = default;
 
   // --- Module interface ---
+  void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
+            MemoryLevel level) override;
+  ModuleDescriptor Dump(Checkpoint& ckp) override;
   std::string ModuleTypeName() const override { return "index"; }
 
   // --- Data operations ---

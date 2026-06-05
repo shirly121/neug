@@ -23,6 +23,7 @@
 #include "neug/storages/checkpoint.h"
 #include "neug/storages/checkpoint_manifest.h"
 #include "neug/storages/index/i_index.h"
+#include "neug/storages/module/module_broker.h"
 #include "neug/utils/result.h"
 
 namespace neug {
@@ -66,9 +67,12 @@ class IndexManager {
   Status GetAllIndexes(std::vector<Index*>& target_indexes);
 
   /**
-   * @brief Restore all indexes from a checkpoint manifest.
+   * @brief Restore all indexes from a ModuleBroker + CheckpointManifest.
+   *
+   * Takes ownership of index modules (prefix "index_") from the broker.
    */
-  void Open(Checkpoint& ckp, const CheckpointManifest& meta, MemoryLevel level);
+  void Open(Checkpoint& ckp, ModuleBroker& store,
+            const CheckpointManifest& meta, MemoryLevel level);
 
   /**
    * @brief Persist all indexes to a checkpoint manifest.
@@ -81,6 +85,9 @@ class IndexManager {
   std::shared_ptr<IndexManager> Fork() const;
 
   const auto& GetAllIndexEntries() const { return indexes_; }
+
+  static bool IsIndexModule(const std::string& name);
+  static std::string GetKey(const std::string& index_name);
 
  private:
   std::unordered_map<std::string, std::shared_ptr<Index>> indexes_;

@@ -45,6 +45,8 @@ struct HNSWIndexQueryParams : neug::IndexQueryParams {
  */
 class HNSWIndex : public neug::Index {
  public:
+  static std::string type_name() { return "hnsw_index"; }
+
   HNSWIndex() = default;
   HNSWIndex(const std::string& name, const neug::IndexMeta& meta,
             const neug::IStorageInterface& transaction);

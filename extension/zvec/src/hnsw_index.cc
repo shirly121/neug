@@ -36,17 +36,6 @@ static MetricType ParseMetricType(const std::string& metric_str) {
   return MetricType::kL2sq;  // default
 }
 
-static std::string MetricTypeToString(MetricType metric) {
-  switch (metric) {
-  case MetricType::kInnerProduct:
-    return "ip";
-  case MetricType::kCosine:
-    return "cosine";
-  default:
-    return "l2";
-  }
-}
-
 HNSWIndex::HNSWIndex(const std::string& name, const neug::IndexMeta& meta,
                      const neug::IStorageInterface& transaction)
     : Index(name, meta, transaction) {
@@ -100,131 +89,74 @@ HNSWIndex::HNSWIndex(const std::string& name, const neug::IndexMeta& meta,
 
 void HNSWIndex::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                      MemoryLevel level) {
-  // Restore HNSW params from descriptor
-  auto dim_str = descriptor.get("dimension");
-  if (dim_str.has_value()) {
-    dimension_ = std::stoi(dim_str.value());
-  }
-  auto m_str = descriptor.get("m");
-  if (m_str.has_value()) {
-    m_ = std::stoi(m_str.value());
-  }
-  auto ef_str = descriptor.get("ef_construction");
-  if (ef_str.has_value()) {
-    ef_construction_ = std::stoi(ef_str.value());
-  }
-  auto metric_str = descriptor.get("metric");
-  if (metric_str.has_value()) {
-    metric_ = ParseMetricType(metric_str.value());
+  // 1. Call base to restore IndexMeta and DocIDMap
+  Index::Open(ckp, descriptor, level);
+
+  // 2. Extract HNSW params from meta_.options
+  auto it = meta_.options.find("dimension");
+  if (it != meta_.options.end())
+    dimension_ = std::stoi(it->second);
+  it = meta_.options.find("m");
+  if (it != meta_.options.end())
+    m_ = std::stoi(it->second);
+  it = meta_.options.find("ef_construction");
+  if (it != meta_.options.end())
+    ef_construction_ = std::stoi(it->second);
+  it = meta_.options.find("metric");
+  if (it != meta_.options.end())
+    metric_ = ParseMetricType(it->second);
+
+  // 3. Create runtime path
+  std::string runtime_uuid = ckp.CreateRuntimeObject();
+  zvec_runtime_path_ = ckp.runtime_dir() + "/" + runtime_uuid;
+
+  // 4. Get index_buffer path from descriptor
+  auto index_path = descriptor.get_path("index_buffer");
+  bool has_existing = index_path.has_value() && !index_path->empty() &&
+                      std::filesystem::exists(*index_path);
+
+  // 5. Copy existing or prepare fresh
+  if (has_existing && *index_path != zvec_runtime_path_) {
+    std::filesystem::copy(*index_path, zvec_runtime_path_,
+                          std::filesystem::copy_options::overwrite_existing |
+                              std::filesystem::copy_options::recursive);
+  } else if (!has_existing) {
+    std::filesystem::remove_all(zvec_runtime_path_);
   }
 
-  // Restore IndexMeta
-  auto name_str = descriptor.get("name");
-  if (name_str.has_value()) {
-    meta_.name = name_str.value();
-  }
-  meta_.type = "HNSW";
-  auto label_str = descriptor.get("label_name");
-  if (label_str.has_value()) {
-    meta_.schema.label.label_name = label_str.value();
+  // 6. Create and open zvec index
+  HNSWIndexParam param(metric_, dimension_, m_, ef_construction_);
+  param.data_type = zvec::core_interface::DataType::DT_FP32;
+  zvec_index_ = IndexFactory::CreateAndInitIndex(param);
+  if (!zvec_index_) {
+    throw std::runtime_error(
+        "[zvec] Failed to create HNSW index: IndexFactory returned null");
   }
 
-  // Also store params in meta_.options for consistency
-  meta_.options["dimension"] = std::to_string(dimension_);
-  meta_.options["m"] = std::to_string(m_);
-  meta_.options["ef_construction"] = std::to_string(ef_construction_);
-  meta_.options["metric"] = MetricTypeToString(metric_);
+  StorageOptions opts;
+  opts.type = StorageOptions::StorageType::kMMAP;
+  opts.create_new = !has_existing;
+  opts.read_only = false;
 
-  // Open DocIDMap from the doc_id_map sub-descriptor
-  doc_id_map_ = std::make_shared<DocIDMap>();
-  auto doc_id_map_next = descriptor.get("doc_id_map_next_doc_id");
-  if (doc_id_map_next.has_value()) {
-    ModuleDescriptor doc_desc;
-    doc_desc.module_type = "doc_id_map";
-    doc_desc.set("next_doc_id", doc_id_map_next.value());
-    auto doc_buffer_path = descriptor.get_path("doc_id_map_buffer");
-    if (doc_buffer_path.has_value()) {
-      doc_desc.set_path("buffer", doc_buffer_path.value());
-    }
-    doc_id_map_->Open(ckp, doc_desc, level);
+  int ret = zvec_index_->Open(zvec_runtime_path_, opts);
+  if (ret != 0) {
+    throw std::runtime_error(
+        "[zvec] Failed to open HNSW index at: " + zvec_runtime_path_ +
+        ", error code: " + std::to_string(ret));
   }
-
-  // Open ZVec index from file
-  auto zvec_path = descriptor.get_path("zvec_data");
-  if (zvec_path.has_value() && !zvec_path->empty()) {
-    HNSWIndexParam param(metric_, dimension_, m_, ef_construction_);
-    param.data_type = zvec::core_interface::DataType::DT_FP32;
-    zvec_index_ = IndexFactory::CreateAndInitIndex(param);
-
-    StorageOptions opts;
-    opts.type = StorageOptions::StorageType::kMMAP;
-    opts.create_new = false;
-    opts.read_only = false;
-
-    int ret = zvec_index_->Open(zvec_path.value(), opts);
-    if (ret != 0) {
-      throw std::runtime_error(
-          "[zvec] Failed to open HNSW index from path: " + zvec_path.value() +
-          ", error code: " + std::to_string(ret));
-    }
-    LOG(INFO) << "[zvec] Opened HNSW index from: " << zvec_path.value();
-  } else if (!zvec_index_) {
-    // Create a fresh in-memory index
-    HNSWIndexParam param(metric_, dimension_, m_, ef_construction_);
-    param.data_type = zvec::core_interface::DataType::DT_FP32;
-    zvec_index_ = IndexFactory::CreateAndInitIndex(param);
-  }
+  LOG(INFO) << "[zvec] Opened HNSW index at runtime path: "
+            << zvec_runtime_path_;
 }
 
 ModuleDescriptor HNSWIndex::Dump(Checkpoint& ckp) {
-  ModuleDescriptor desc;
+  // Call base to persist IndexMeta and DocIDMap
+  auto desc = Index::Dump(ckp);
   desc.module_type = "hnsw_index";
 
-  // Store HNSW params
-  desc.set("dimension", std::to_string(dimension_));
-  desc.set("metric", MetricTypeToString(metric_));
-  desc.set("m", std::to_string(m_));
-  desc.set("ef_construction", std::to_string(ef_construction_));
-  desc.set("name", meta_.name);
-  desc.set("label_name", meta_.schema.label.label_name);
-
-  // Dump DocIDMap and embed its info
-  if (doc_id_map_) {
-    auto doc_desc = doc_id_map_->Dump(ckp);
-    auto next_doc_id = doc_desc.get("next_doc_id");
-    if (next_doc_id.has_value()) {
-      desc.set("doc_id_map_next_doc_id", next_doc_id.value());
-    }
-    auto buffer_path = doc_desc.get_path("buffer");
-    if (buffer_path.has_value()) {
-      desc.set_path("doc_id_map_buffer", buffer_path.value());
-    }
-  }
-
-  // Dump ZVec index via runtime object
+  // Persist HNSW index via ZVecDumpContainer
   if (zvec_index_) {
-    std::string runtime_uuid = ckp.CreateRuntimeObject();
-
-    StorageOptions opts;
-    opts.type = StorageOptions::StorageType::kMMAP;
-    opts.create_new = true;
-    opts.read_only = false;
-
-    int ret = zvec_index_->Open(runtime_uuid, opts);
-    if (ret != 0) {
-      throw std::runtime_error(
-          "[zvec] Failed to open index for dump at path: " + runtime_uuid +
-          ", error code: " + std::to_string(ret));
-    }
-    ret = zvec_index_->Flush();
-    if (ret != 0) {
-      throw std::runtime_error(
-          "[zvec] Failed to flush HNSW index, error code: " +
-          std::to_string(ret));
-    }
-
-    std::string snapshot_path = ckp.CommitRuntimeObject(runtime_uuid);
-    desc.set_path("zvec_data", snapshot_path);
+    ZVecDumpContainer container(zvec_index_.get(), zvec_runtime_path_);
+    desc.set_path("index_buffer", ckp.Commit(container));
   }
 
   return desc;
