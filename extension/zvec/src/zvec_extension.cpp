@@ -22,66 +22,24 @@
 
 #include "hnsw_index.h"
 
-#include "zvec/core/interface/index_param.h"
-
 namespace neug::extension::zvec_ext {
 
 /**
  * @brief Register HNSW index creator in the NeuG IndexFactory.
  *
- * Factory creates HNSWIndex via default constructor. The transaction
- * is set later via SetStorageInterface(). Open() restores state from
- * the ModuleDescriptor.
+ * Factory creates HNSWIndex via default constructor.
+ * For CreateIndex path: meta is set via Index::SetMeta() after factory
+ * creation. For checkpoint restore: Open() restores state from the
+ * ModuleDescriptor.
  */
 static void RegisterHNSWIndex() {
-  auto creator =
-      [](const neug::ModuleDescriptor& desc) -> std::unique_ptr<neug::Index> {
-    // Create via default constructor; Open() will restore full state
-    auto index = std::make_unique<HNSWIndex>();
+  neug::IndexFactory::Instance().RegisterCreator(
+      "hnsw_index",
+      [](const neug::ModuleDescriptor&) -> std::unique_ptr<neug::Index> {
+        return std::make_unique<HNSWIndex>();
+      });
 
-    // Pre-populate meta_ from descriptor for factory consumers that
-    // read meta before calling Open()
-    neug::IndexMeta meta;
-    meta.type = "HNSW";
-    auto name_str = desc.get("name");
-    if (name_str.has_value()) {
-      meta.name = name_str.value();
-    }
-    auto dim_str = desc.get("dimension");
-    if (dim_str.has_value()) {
-      meta.options["dimension"] = dim_str.value();
-    }
-    auto m_str = desc.get("m");
-    if (m_str.has_value()) {
-      meta.options["m"] = m_str.value();
-    } else {
-      meta.options["m"] =
-          std::to_string(zvec::core_interface::kDefaultHnswNeighborCnt);
-    }
-    auto ef_str = desc.get("ef_construction");
-    if (ef_str.has_value()) {
-      meta.options["ef_construction"] = ef_str.value();
-    } else {
-      meta.options["ef_construction"] =
-          std::to_string(zvec::core_interface::kDefaultHnswEfConstruction);
-    }
-    auto metric_str = desc.get("metric");
-    if (metric_str.has_value()) {
-      meta.options["metric"] = metric_str.value();
-    } else {
-      meta.options["metric"] = "l2";
-    }
-
-    return index;
-  };
-
-  neug::IndexFactory::Instance().RegisterCreator("hnsw_index", creator);
-  neug::IndexFactory::Instance().RegisterCreator("HNSW", creator);
-
-  // Register with ModuleFactory so ModuleBroker can restore from checkpoint
-  neug::ModuleFactory::instance().Register("hnsw_index", [] {
-    return std::make_unique<neug::extension::zvec_ext::HNSWIndex>();
-  });
+  neug::ModuleFactory::instance().Register<HNSWIndex>();
 
   LOG(INFO) << "[zvec extension] Registered HNSW index type";
 }

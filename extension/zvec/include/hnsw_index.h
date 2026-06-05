@@ -48,8 +48,7 @@ class HNSWIndex : public neug::Index {
   static std::string type_name() { return "hnsw_index"; }
 
   HNSWIndex() = default;
-  HNSWIndex(const std::string& name, const neug::IndexMeta& meta,
-            const neug::IStorageInterface& transaction);
+  HNSWIndex(std::string name, std::unique_ptr<neug::IndexMeta> meta);
   ~HNSWIndex() override = default;
 
   // Module interface

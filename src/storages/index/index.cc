@@ -193,17 +193,18 @@ void Index::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                  MemoryLevel level) {
   auto index_meta_str = descriptor.get("index_meta");
   if (index_meta_str.has_value()) {
-    meta_ = IndexMeta::FromJsonString(index_meta_str.value());
+    meta_ = std::make_unique<IndexMeta>(
+        IndexMeta::FromJsonString(index_meta_str.value()));
   }
 
-  doc_id_map_ = std::make_shared<DocIDMap>();
+  doc_id_map_ = std::make_unique<DocIDMap>();
   doc_id_map_->Open(ckp, descriptor, level);
 }
 
 ModuleDescriptor Index::Dump(Checkpoint& ckp) {
   ModuleDescriptor desc;
   // Do not set module_type here — subclasses set their specific type.
-  desc.set("index_meta", meta_.ToJsonString());
+  desc.set("index_meta", meta_->ToJsonString());
 
   if (doc_id_map_) {
     auto doc_desc = doc_id_map_->Dump(ckp);

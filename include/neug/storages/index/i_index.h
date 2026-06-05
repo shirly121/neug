@@ -32,8 +32,6 @@
 
 namespace neug {
 
-class IStorageInterface;
-
 // --- Index metadata types ---
 
 enum class EntryType : uint8_t { VERTEX = 1, EDGE = 2 };
@@ -91,12 +89,11 @@ struct IndexFilterParams {};
  */
 class Index : public Module {
  public:
-  Index() = default;
+  Index() : meta_(std::make_unique<IndexMeta>()) {}
 
-  Index(const std::string& name, const IndexMeta& meta,
-        const IStorageInterface& transaction)
-      : meta_(meta), transaction_(&transaction) {
-    meta_.name = name;
+  Index(std::string name, std::unique_ptr<IndexMeta> meta)
+      : meta_(std::move(meta)) {
+    meta_->name = std::move(name);
   }
 
   ~Index() override = default;
@@ -112,7 +109,7 @@ class Index : public Module {
   /**
    * @brief Search for nearest neighbors.
    * @param params Query parameters (subclass-specific).
-   * @param filter_params MVCC filter (built internally via transaction_).
+   * @param filter_params MVCC filter parameters.
    * @param results Output: vid_t results after doc_id -> vid translation.
    */
   virtual Status Search(const IndexQueryParams& params,
@@ -153,12 +150,8 @@ class Index : public Module {
   virtual void LazyFork() = 0;
 
   // --- Metadata ---
-  const IndexMeta& GetMeta() const { return meta_; }
-
-  // --- Storage interface ---
-  void SetStorageInterface(const IStorageInterface* iface) {
-    transaction_ = iface;
-  }
+  const IndexMeta& GetMeta() const { return *meta_; }
+  void SetMeta(std::unique_ptr<IndexMeta> meta) { meta_ = std::move(meta); }
 
  protected:
   /**
@@ -170,9 +163,8 @@ class Index : public Module {
   virtual Status AppendImpl(vid_t vid, doc_id_t doc_id,
                             const std::vector<Property>& values) = 0;
 
-  IndexMeta meta_;
-  std::shared_ptr<DocIDMap> doc_id_map_;
-  const IStorageInterface* transaction_ = nullptr;
+  std::unique_ptr<IndexMeta> meta_;
+  std::unique_ptr<DocIDMap> doc_id_map_;
 };
 
 }  // namespace neug

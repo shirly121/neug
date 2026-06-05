@@ -76,9 +76,14 @@ class DocIDMap : public Module {
   vid_t GetVID(doc_id_t doc_id) const;
 
   /**
-   * @brief Deep copy for COW support.
+   * @brief Deep copy for COW support (requires Checkpoint for buffer alloc).
    */
   std::unique_ptr<DocIDMap> Fork(Checkpoint& ckp) const;
+
+  /**
+   * @brief Deep copy without Checkpoint (uses anonymous mmap).
+   */
+  std::unique_ptr<DocIDMap> Clone() const;
 
   /**
    * @brief Grow the buffer to accommodate at least new_capacity entries.

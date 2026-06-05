@@ -39,6 +39,11 @@ neug::result<Index*> IndexManager::CreateIndex(const std::string& name,
                         "Unknown index type: " + meta.type);
   }
 
+  // Set the meta on the newly created index
+  auto meta_copy = std::make_unique<IndexMeta>(meta);
+  meta_copy->name = name;
+  index->SetMeta(std::move(meta_copy));
+
   auto* raw_ptr = index.get();
   indexes_[name] = std::shared_ptr<Index>(index.release());
   return raw_ptr;

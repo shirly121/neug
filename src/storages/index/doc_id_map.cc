@@ -90,6 +90,24 @@ std::unique_ptr<DocIDMap> DocIDMap::Fork(Checkpoint& ckp) const {
   return forked;
 }
 
+std::unique_ptr<DocIDMap> DocIDMap::Clone() const {
+  auto cloned = std::make_unique<DocIDMap>();
+  size_t n = next_doc_id_.load(std::memory_order_relaxed);
+  size_t data_size = std::max(n, kDefaultCapacity) * sizeof(vid_t);
+
+  auto anon = std::make_unique<AnonMMap>();
+  anon->OpenAnonymous(data_size);
+  cloned->buffer_ = std::move(anon);
+
+  if (n > 0 && buffer_) {
+    std::memcpy(cloned->buffer_->GetData(), buffer_->GetData(),
+                n * sizeof(vid_t));
+  }
+  cloned->next_doc_id_.store(static_cast<doc_id_t>(n),
+                             std::memory_order_relaxed);
+  return cloned;
+}
+
 void DocIDMap::Resize(size_t new_capacity) {
   if (new_capacity <= capacity()) {
     return;

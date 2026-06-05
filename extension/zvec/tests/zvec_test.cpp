@@ -15,20 +15,24 @@
 
 #include <gtest/gtest.h>
 
-#include <cstdlib>
 #include <filesystem>
 #include <vector>
 
 #include "hnsw_index.h"
-#include "neug/storages/graph/graph_interface.h"
+#include "neug/storages/checkpoint.h"
+#include "neug/storages/checkpoint_manifest.h"
 #include "neug/storages/index/i_index.h"
-#include "neug/storages/index/index_factory.h"
+#include "neug/storages/module/module_broker.h"
+#include "neug/storages/module/module_factory.h"
 #include "neug/utils/property/property.h"
 
 namespace neug::extension::zvec_ext {
 namespace {
 
-/// Helper: pack raw float array into a Property as string_view.
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 static neug::Property MakeVectorProperty(const float* data, int dim) {
   neug::Property p;
   p.set_string_view(std::string_view(reinterpret_cast<const char*>(data),
@@ -36,175 +40,270 @@ static neug::Property MakeVectorProperty(const float* data, int dim) {
   return p;
 }
 
-/// Build an IndexMeta with HNSW options from individual params.
-static neug::IndexMeta MakeHNSWMeta(const std::string& name, int dimension,
-                                    const std::string& metric = "l2",
-                                    int m = 16, int ef = 200) {
-  neug::IndexMeta meta;
-  meta.name = name;
-  meta.type = "HNSW";
-  meta.options["dimension"] = std::to_string(dimension);
-  meta.options["metric"] = metric;
-  meta.options["m"] = std::to_string(m);
-  meta.options["ef_construction"] = std::to_string(ef);
+static std::unique_ptr<neug::IndexMeta> MakeHNSWMeta(
+    const std::string& name, int dimension, const std::string& metric = "l2",
+    int m = 16, int ef = 200) {
+  auto meta = std::make_unique<neug::IndexMeta>();
+  meta->name = name;
+  meta->type = "HNSW";
+  meta->options["dimension"] = std::to_string(dimension);
+  meta->options["metric"] = metric;
+  meta->options["m"] = std::to_string(m);
+  meta->options["ef_construction"] = std::to_string(ef);
   return meta;
 }
 
-/// Minimal IStorageInterface stub for tests (no actual graph).
-class StubStorageInterface : public neug::IStorageInterface {
- public:
-  bool readable() const override { return false; }
-  bool writable() const override { return false; }
-  const neug::Schema& schema() const override {
-    static neug::Schema s;
-    return s;
-  }
-  bool GetVertexIndex(neug::label_t, const neug::Property&,
-                      neug::vid_t&) const override {
-    return false;
-  }
-};
+static std::vector<float> MakeVector(int dim, float value) {
+  return std::vector<float>(dim, value);
+}
 
-class HNSWIndexTest : public ::testing::Test {
+// ---------------------------------------------------------------------------
+// Suite 1: Lifecycle — Open → Dump → reOpen → Append → Dump → Search
+//
+// A single test that verifies the full sequential chain, so it can be
+// run independently without depending on other tests.
+// ---------------------------------------------------------------------------
+
+class HNSWIndexLifecycleTest : public ::testing::Test {
  protected:
-  static constexpr int kDimension = 128;
-  static constexpr int kNumVectors = 100;
-  static constexpr int kTopK = 10;
+  static constexpr int kDimension = 16;
+
+  std::filesystem::path tmp_dir_;
+  std::shared_ptr<neug::Checkpoint> ckp_;
 
   void SetUp() override {
-    tmp_dir_ = std::filesystem::temp_directory_path() / "neug_zvec_test";
+    tmp_dir_ = std::filesystem::temp_directory_path() / "neug_zvec_lifecycle";
+    std::filesystem::remove_all(tmp_dir_);
     std::filesystem::create_directories(tmp_dir_);
+    auto ckp_dir = tmp_dir_ / "checkpoint-0";
+    ckp_ = neug::Checkpoint::Open(ckp_dir.string(), 0);
   }
 
-  void TearDown() override { std::filesystem::remove_all(tmp_dir_); }
-
-  static std::vector<float> RandomVector(int dim) {
-    std::vector<float> v(dim);
-    for (int i = 0; i < dim; ++i) {
-      v[i] = static_cast<float>(rand()) / RAND_MAX;
-    }
-    return v;
+  void TearDown() override {
+    ckp_.reset();
+    std::filesystem::remove_all(tmp_dir_);
   }
-
-  StubStorageInterface stub_storage_;
-  std::filesystem::path tmp_dir_;
 };
 
-TEST_F(HNSWIndexTest, CreateAndAppend) {
-  auto meta = MakeHNSWMeta("test", kDimension);
-  HNSWIndex index("test", meta, stub_storage_);
+TEST_F(HNSWIndexLifecycleTest, OpenDumpAppendSearch) {
+  // -- Step 1: Create fresh index, verify meta, dump -------------------------
+  neug::ModuleDescriptor desc;
+  {
+    auto meta = MakeHNSWMeta("lifecycle_test", kDimension);
+    HNSWIndex index("lifecycle_test", std::move(meta));
 
-  // Append vectors
-  for (int i = 0; i < kNumVectors; ++i) {
-    auto vec = RandomVector(kDimension);
-    auto status = index.Append(static_cast<vid_t>(i),
-                               {MakeVectorProperty(vec.data(), kDimension)});
+    neug::ModuleDescriptor empty_desc;
+    ASSERT_NO_THROW(
+        index.Open(*ckp_, empty_desc, neug::MemoryLevel::kInMemory));
+
+    const auto& m = index.GetMeta();
+    EXPECT_EQ(m.name, "lifecycle_test");
+    EXPECT_EQ(m.type, "HNSW");
+    EXPECT_EQ(m.options.at("dimension"), std::to_string(kDimension));
+
+    desc = index.Dump(*ckp_);
+    ASSERT_TRUE(desc.has("index_meta"));
+  }
+
+  // -- Step 2: Reopen from dump, append vids [0,1,2,3], dump -----------------
+  {
+    HNSWIndex index;
+    index.Open(*ckp_, desc, neug::MemoryLevel::kInMemory);
+
+    for (int i = 0; i < 4; ++i) {
+      auto vec = MakeVector(kDimension, static_cast<float>(i));
+      auto status = index.Append(static_cast<vid_t>(i),
+                                 {MakeVectorProperty(vec.data(), kDimension)});
+      ASSERT_TRUE(status.ok()) << status.error_message();
+    }
+
+    desc = index.Dump(*ckp_);
+
+    // Verify data can be reopened
+    HNSWIndex verify_index;
+    ASSERT_NO_THROW(
+        verify_index.Open(*ckp_, desc, neug::MemoryLevel::kInMemory));
+  }
+
+  // -- Step 3: Reopen from dump, search [2.1,...], verify nearest=vid 2 ------
+  {
+    HNSWIndex index;
+    index.Open(*ckp_, desc, neug::MemoryLevel::kInMemory);
+
+    auto query = MakeVector(kDimension, 2.1f);
+    HNSWIndexQueryParams params;
+    params.query_vector = query.data();
+    params.dimension = kDimension;
+    params.topk = 4;
+
+    neug::IndexFilterParams filter_params;
+    std::vector<vid_t> results;
+    auto status = index.Search(params, filter_params, results);
     ASSERT_TRUE(status.ok()) << status.error_message();
+    ASSERT_GE(results.size(), 1u);
+    EXPECT_EQ(results[0], 2u)
+        << "nearest to [2.1,...] should be vid=2 [2.0,...]";
   }
 }
 
-TEST_F(HNSWIndexTest, SearchReturnsResults) {
-  auto meta = MakeHNSWMeta("test", kDimension);
-  HNSWIndex index("test", meta, stub_storage_);
+// ---------------------------------------------------------------------------
+// Suite 2: Advanced — larger dataset with multiple search patterns
+//
+// SetUpTestSuite inserts 1000 vectors (vid i -> [i, i, ...]) and dumps.
+// Each test opens independently from the same dumped descriptor.
+// ---------------------------------------------------------------------------
 
-  std::vector<std::vector<float>> vectors;
-  for (int i = 0; i < kNumVectors; ++i) {
-    vectors.push_back(RandomVector(kDimension));
-    auto status =
-        index.Append(static_cast<vid_t>(i),
-                     {MakeVectorProperty(vectors.back().data(), kDimension)});
-    ASSERT_TRUE(status.ok());
+class HNSWIndexAdvancedTest : public ::testing::Test {
+ protected:
+  static constexpr int kDimension = 16;
+  static constexpr int kNumVectors = 1000;
+
+  static std::filesystem::path tmp_dir_;
+  static std::shared_ptr<neug::Checkpoint> ckp_;
+  static neug::ModuleDescriptor last_desc_;
+
+  static void SetUpTestSuite() {
+    tmp_dir_ = std::filesystem::temp_directory_path() / "neug_zvec_advanced";
+    std::filesystem::remove_all(tmp_dir_);
+    std::filesystem::create_directories(tmp_dir_);
+    auto ckp_dir = tmp_dir_ / "checkpoint-0";
+    ckp_ = neug::Checkpoint::Open(ckp_dir.string(), 0);
+
+    // Build index with 1000 deterministic vectors
+    auto meta = MakeHNSWMeta("advanced_test", kDimension);
+    HNSWIndex index("advanced_test", std::move(meta));
+
+    neug::ModuleDescriptor empty_desc;
+    index.Open(*ckp_, empty_desc, neug::MemoryLevel::kInMemory);
+
+    for (int i = 0; i < kNumVectors; ++i) {
+      auto vec = MakeVector(kDimension, static_cast<float>(i));
+      auto status = index.Append(static_cast<vid_t>(i),
+                                 {MakeVectorProperty(vec.data(), kDimension)});
+      ASSERT_TRUE(status.ok()) << status.error_message();
+    }
+
+    last_desc_ = index.Dump(*ckp_);
   }
 
-  // Search with the first vector as query
-  HNSWIndexQueryParams params;
-  params.query_vector = vectors[0].data();
-  params.dimension = kDimension;
-  params.topk = kTopK;
+  static void TearDownTestSuite() {
+    ckp_.reset();
+    std::filesystem::remove_all(tmp_dir_);
+  }
 
-  neug::IndexFilterParams filter_params;
-  std::vector<vid_t> results;
+  std::unique_ptr<HNSWIndex> OpenIndex() {
+    auto index = std::make_unique<HNSWIndex>();
+    index->Open(*ckp_, last_desc_, neug::MemoryLevel::kInMemory);
+    return index;
+  }
 
-  auto status = index.Search(params, filter_params, results);
-  ASSERT_TRUE(status.ok()) << status.error_message();
-  ASSERT_GT(results.size(), 0u);
-  ASSERT_LE(results.size(), static_cast<size_t>(kTopK));
+  std::vector<vid_t> DoSearch(HNSWIndex& index, float query_value, int topk) {
+    auto query = MakeVector(kDimension, query_value);
+    HNSWIndexQueryParams params;
+    params.query_vector = query.data();
+    params.dimension = kDimension;
+    params.topk = topk;
 
-  // The nearest neighbor of vectors[0] should be itself (vid=0)
+    neug::IndexFilterParams filter_params;
+    std::vector<vid_t> results;
+    auto status = index.Search(params, filter_params, results);
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    return results;
+  }
+};
+
+std::filesystem::path HNSWIndexAdvancedTest::tmp_dir_;
+std::shared_ptr<neug::Checkpoint> HNSWIndexAdvancedTest::ckp_;
+neug::ModuleDescriptor HNSWIndexAdvancedTest::last_desc_;
+
+// Search [3.1, ...]: nearest vid=3, then vid=4, then vid=2
+// L2sq distances: d(3.1,3)=16*0.01=0.16, d(3.1,4)=16*0.81=12.96,
+//                 d(3.1,2)=16*1.21=19.36
+TEST_F(HNSWIndexAdvancedTest, SearchOrdering) {
+  auto index = OpenIndex();
+  auto results = DoSearch(*index, 3.1f, 10);
+
+  ASSERT_GE(results.size(), 3u);
+  EXPECT_EQ(results[0], 3u);
+  EXPECT_EQ(results[1], 4u);
+  EXPECT_EQ(results[2], 2u);
+}
+
+// Search [0.0, ...]: nearest vid=0
+TEST_F(HNSWIndexAdvancedTest, SearchExactMatch) {
+  auto index = OpenIndex();
+  auto results = DoSearch(*index, 0.0f, 10);
+
+  ASSERT_GE(results.size(), 1u);
   EXPECT_EQ(results[0], 0u);
 }
 
-TEST_F(HNSWIndexTest, DeleteExcludesFromSearch) {
-  auto meta = MakeHNSWMeta("test", kDimension);
-  HNSWIndex index("test", meta, stub_storage_);
+// Search [500.0, ...]: nearest vid=500, then 501, then 499
+TEST_F(HNSWIndexAdvancedTest, SearchMiddle) {
+  auto index = OpenIndex();
+  auto results = DoSearch(*index, 500.0f, 10);
 
-  std::vector<std::vector<float>> vectors;
-  for (int i = 0; i < kNumVectors; ++i) {
-    vectors.push_back(RandomVector(kDimension));
-    index.Append(static_cast<vid_t>(i),
-                 {MakeVectorProperty(vectors.back().data(), kDimension)});
-  }
+  ASSERT_GE(results.size(), 3u);
+  EXPECT_EQ(results[0], 500u);
+  EXPECT_EQ(results[1], 501u);
+  EXPECT_EQ(results[2], 499u);
+}
 
-  // Delete vid 0
-  index.Delete(static_cast<vid_t>(0));
+// Search [999.0, ...]: nearest vid=999 (boundary)
+TEST_F(HNSWIndexAdvancedTest, SearchBoundary) {
+  auto index = OpenIndex();
+  auto results = DoSearch(*index, 999.0f, 10);
 
-  // Search for vectors[0] -- vid 0 should not appear
-  HNSWIndexQueryParams params;
-  params.query_vector = vectors[0].data();
-  params.dimension = kDimension;
-  params.topk = kTopK;
+  ASSERT_GE(results.size(), 1u);
+  EXPECT_EQ(results[0], 999u);
+}
 
-  neug::IndexFilterParams filter_params;
-  std::vector<vid_t> results;
-  auto status = index.Search(params, filter_params, results);
-  ASSERT_TRUE(status.ok());
+// Delete vid 3, search [3.1, ...]: vid 3 must not appear in results
+TEST_F(HNSWIndexAdvancedTest, DeleteAndSearch) {
+  auto index = OpenIndex();
+
+  auto status = index->Delete(static_cast<vid_t>(3));
+  ASSERT_TRUE(status.ok()) << status.error_message();
+
+  auto results = DoSearch(*index, 3.1f, 10);
+  ASSERT_GE(results.size(), 1u);
 
   for (auto vid : results) {
-    EXPECT_NE(vid, 0u);
+    EXPECT_NE(vid, 3u) << "deleted vid should not appear in results";
   }
+  // After deleting 3, nearest to 3.1 should be 4 (d=12.96) or 2 (d=19.36)
+  EXPECT_TRUE(results[0] == 4u || results[0] == 2u);
 }
 
-TEST_F(HNSWIndexTest, MetadataIsCorrect) {
-  auto meta = MakeHNSWMeta("test_meta", kDimension);
-  HNSWIndex index("test_meta", meta, stub_storage_);
+// Metadata roundtrip: constructor sets meta, Open preserves it
+TEST_F(HNSWIndexAdvancedTest, MetadataRoundtrip) {
+  auto index = OpenIndex();
 
-  const auto& returned_meta = index.GetMeta();
-  EXPECT_EQ(returned_meta.type, "HNSW");
-  EXPECT_EQ(returned_meta.name, "test_meta");
+  const auto& meta = index->GetMeta();
+  EXPECT_EQ(meta.name, "advanced_test");
+  EXPECT_EQ(meta.type, "HNSW");
+  EXPECT_EQ(meta.options.at("dimension"), std::to_string(kDimension));
+  EXPECT_EQ(meta.options.at("metric"), "l2");
 }
 
-TEST_F(HNSWIndexTest, ForkSharesState) {
-  auto meta = MakeHNSWMeta("fork_test", kDimension);
-  HNSWIndex index("fork_test", meta, stub_storage_);
+// Restore index via ModuleBroker from checkpoint descriptor, verify meta
+TEST_F(HNSWIndexAdvancedTest, ModuleBrokerRestore) {
+  neug::ModuleFactory::instance().Register<HNSWIndex>();
 
-  // Insert some vectors
-  for (int i = 0; i < 100; ++i) {
-    auto vec = RandomVector(kDimension);
-    index.Append(static_cast<vid_t>(i),
-                 {MakeVectorProperty(vec.data(), kDimension)});
-  }
+  neug::CheckpointManifest manifest;
+  manifest.set_module("index_advanced_test", last_desc_);
 
-  // Fork
-  auto forked = index.Fork();
-  ASSERT_NE(forked, nullptr);
-  EXPECT_EQ(forked->GetMeta().name, "fork_test");
-}
+  neug::ModuleBroker broker;
+  broker.Open(*ckp_, manifest, neug::MemoryLevel::kInMemory);
 
-TEST_F(HNSWIndexTest, IndexFactoryRegistration) {
-  neug::IndexFactory::Instance().RegisterCreator(
-      "HNSW",
-      [](const neug::ModuleDescriptor &
-         /*desc*/) -> std::unique_ptr<neug::Index> {
-        return std::make_unique<HNSWIndex>();
-      });
-
-  EXPECT_TRUE(neug::IndexFactory::Instance().HasType("HNSW"));
-
-  neug::ModuleDescriptor desc;
-  desc.set("dimension", "64");
-  desc.set("metric", "l2");
-  auto index = neug::IndexFactory::Instance().Create("HNSW", desc);
+  auto index = broker.TakeModule<neug::Index>("index_advanced_test");
   ASSERT_NE(index, nullptr);
+
+  const auto& meta = index->GetMeta();
+  EXPECT_EQ(meta.name, "advanced_test");
+  EXPECT_EQ(meta.type, "HNSW");
+  EXPECT_EQ(meta.options.at("dimension"), std::to_string(kDimension));
+  EXPECT_EQ(meta.options.at("metric"), "l2");
 }
 
 }  // namespace

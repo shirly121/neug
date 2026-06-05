@@ -20,7 +20,6 @@
 #include <stdexcept>
 
 #include "neug/storages/checkpoint.h"
-#include "neug/storages/graph/graph_interface.h"
 #include "zvec_dump_container.h"
 
 namespace neug::extension::zvec_ext {
@@ -36,55 +35,22 @@ static MetricType ParseMetricType(const std::string& metric_str) {
   return MetricType::kL2sq;  // default
 }
 
-HNSWIndex::HNSWIndex(const std::string& name, const neug::IndexMeta& meta,
-                     const neug::IStorageInterface& transaction)
-    : Index(name, meta, transaction) {
-  // Extract HNSW params from meta_.options
-  auto it = meta_.options.find("dimension");
-  if (it != meta_.options.end())
+HNSWIndex::HNSWIndex(std::string name, std::unique_ptr<neug::IndexMeta> meta)
+    : Index(std::move(name), std::move(meta)) {
+  // Extract HNSW params from meta_->options.
+  // zvec_index_ and doc_id_map_ are created later in Open().
+  auto it = meta_->options.find("dimension");
+  if (it != meta_->options.end())
     dimension_ = std::stoi(it->second);
-  it = meta_.options.find("m");
-  if (it != meta_.options.end())
+  it = meta_->options.find("m");
+  if (it != meta_->options.end())
     m_ = std::stoi(it->second);
-  it = meta_.options.find("ef_construction");
-  if (it != meta_.options.end())
+  it = meta_->options.find("ef_construction");
+  if (it != meta_->options.end())
     ef_construction_ = std::stoi(it->second);
-  it = meta_.options.find("metric");
-  if (it != meta_.options.end())
+  it = meta_->options.find("metric");
+  if (it != meta_->options.end())
     metric_ = ParseMetricType(it->second);
-
-  // Create the zvec index via factory
-  HNSWIndexParam param(metric_, dimension_, m_, ef_construction_);
-  param.data_type = zvec::core_interface::DataType::DT_FP32;
-  zvec_index_ = IndexFactory::CreateAndInitIndex(param);
-  if (!zvec_index_) {
-    throw std::runtime_error(
-        "[zvec] Failed to create HNSW index: IndexFactory returned null");
-  }
-
-  // Open the zvec index with a unique temporary file path so it's ready for
-  // Add()
-  static std::atomic<uint64_t> counter{0};
-  auto tmp = std::filesystem::temp_directory_path() /
-             ("neug_zvec_" + std::to_string(getpid()) + "_" +
-              std::to_string(counter.fetch_add(1)));
-  // Remove stale files from previous runs
-  std::filesystem::remove_all(tmp);
-  zvec_runtime_path_ = tmp.string();
-
-  StorageOptions opts;
-  opts.type = StorageOptions::StorageType::kMMAP;
-  opts.create_new = true;
-  opts.read_only = false;
-  int ret = zvec_index_->Open(zvec_runtime_path_, opts);
-  if (ret != 0) {
-    throw std::runtime_error(
-        "[zvec] Failed to open HNSW index at temp path: " + zvec_runtime_path_ +
-        ", error code: " + std::to_string(ret));
-  }
-
-  // Create default DocIDMap
-  doc_id_map_ = std::make_shared<DocIDMap>();
 }
 
 void HNSWIndex::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
@@ -92,18 +58,18 @@ void HNSWIndex::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
   // 1. Call base to restore IndexMeta and DocIDMap
   Index::Open(ckp, descriptor, level);
 
-  // 2. Extract HNSW params from meta_.options
-  auto it = meta_.options.find("dimension");
-  if (it != meta_.options.end())
+  // 2. Extract HNSW params from meta_->options
+  auto it = meta_->options.find("dimension");
+  if (it != meta_->options.end())
     dimension_ = std::stoi(it->second);
-  it = meta_.options.find("m");
-  if (it != meta_.options.end())
+  it = meta_->options.find("m");
+  if (it != meta_->options.end())
     m_ = std::stoi(it->second);
-  it = meta_.options.find("ef_construction");
-  if (it != meta_.options.end())
+  it = meta_->options.find("ef_construction");
+  if (it != meta_->options.end())
     ef_construction_ = std::stoi(it->second);
-  it = meta_.options.find("metric");
-  if (it != meta_.options.end())
+  it = meta_->options.find("metric");
+  if (it != meta_->options.end())
     metric_ = ParseMetricType(it->second);
 
   // 3. Create runtime path
@@ -202,35 +168,7 @@ Status HNSWIndex::Search(const IndexQueryParams& params,
   search_param->ef_search =
       std::max(static_cast<uint32_t>(hnsw_params.topk), kDefaultHnswEfSearch);
 
-  // Build MVCC filter from DocIDMap + StorageReadInterface::GetVertexSet
-  if (transaction_) {
-    auto* read_iface =
-        dynamic_cast<const neug::StorageReadInterface*>(transaction_);
-    if (read_iface) {
-      label_t label_id = meta_.schema.label.label_id;
-      auto vertex_set = read_iface->GetVertexSet(label_id);
-
-      size_t capacity = vertex_set.size();
-      std::vector<bool> valid_vids(capacity, false);
-      for (vid_t v : vertex_set) {
-        valid_vids[v] = true;
-      }
-
-      auto index_filter = std::make_shared<IndexFilter>();
-      auto& map = doc_id_map_;
-      index_filter->set(
-          [map, valid_vids = std::move(valid_vids)](uint64_t key) -> bool {
-            doc_id_t doc_id = static_cast<doc_id_t>(key);
-            vid_t vid = map->GetVID(doc_id);
-            if (vid == INVALID_VID)
-              return true;  // exclude
-            if (vid >= valid_vids.size())
-              return true;
-            return !valid_vids[vid];  // exclude if not valid at read_ts
-          });
-      search_param->filter = index_filter;
-    }
-  }
+  // TODO: Build MVCC filter from IndexFilterParams when filter support is added
 
   VectorData qd{DenseVector{hnsw_params.query_vector}};
   SearchResult result;
@@ -258,25 +196,21 @@ Status HNSWIndex::Delete(vid_t vid) {
 
 std::shared_ptr<Index> HNSWIndex::Fork() const {
   auto forked = std::make_shared<HNSWIndex>();
-  forked->meta_ = meta_;
-  forked->doc_id_map_ = doc_id_map_;  // shared_ptr copy, refcount+1
+  forked->meta_ = std::make_unique<IndexMeta>(*meta_);
+  if (doc_id_map_) {
+    forked->doc_id_map_ = doc_id_map_->Clone();
+  }
   forked->zvec_index_ = zvec_index_;  // shared_ptr copy, refcount+1
   forked->dimension_ = dimension_;
   forked->m_ = m_;
   forked->ef_construction_ = ef_construction_;
   forked->metric_ = metric_;
-  forked->transaction_ = transaction_;
   return forked;
 }
 
 void HNSWIndex::LazyFork() {
-  if (doc_id_map_.use_count() <= 1) {
-    return;
-  }
-  auto old_map = doc_id_map_;
-  doc_id_map_ = old_map;  // keep sharing for reads
-  // TODO(shirly): Implement proper lazy fork when Checkpoint is available
-  // in the transaction context.
+  // With unique_ptr<DocIDMap>, Fork already deep-copies.
+  // No additional lazy fork needed.
 }
 
 }  // namespace neug::extension::zvec_ext
