@@ -225,14 +225,15 @@ install_arrow_from_source() {
     -DARROW_HDFS=OFF \
     -DARROW_ORC=OFF \
     -DARROW_JSON=ON \
-    -DARROW_PARQUET=OFF \
+    -DARROW_PARQUET=ON \
     -DARROW_PLASMA=OFF \
     -DARROW_PYTHON=OFF \
     -DARROW_S3=OFF \
     -DARROW_WITH_BZ2=OFF \
     -DARROW_WITH_LZ4=OFF \
-    -DARROW_WITH_SNAPPY=OFF \
-    -DARROW_WITH_ZSTD=OFF \
+    -DARROW_WITH_SNAPPY=ON \
+    -DARROW_WITH_ZLIB=ON \
+    -DARROW_WITH_ZSTD=ON \
     -DARROW_WITH_BROTLI=OFF \
     -DARROW_IPC=ON \
     -DARROW_BUILD_BENCHMARKS=OFF \
@@ -319,7 +320,43 @@ install_openssl() {
   export OPENSSL_ROOT_DIR="${install_prefix}"
 }
 
-INTERACTIVE_MACOS=("xsimd", "cmake")
+# Build a static libcurl linked against the static OpenSSL 1.1.1k installed
+# above.  This lets the httpfs extension link cURL statically and avoid the
+# system libcurl + system OpenSSL 3.0 vs aws-lc/BoringSSL symbol conflict
+# (which causes a segfault in OPENSSL_sk_value at runtime).
+install_curl() {
+  if [[ -f "${install_prefix}/lib/libcurl.a" || -f "${install_prefix}/lib64/libcurl.a" ]]; then
+    info "curl already installed, skip."
+    return 0
+  fi
+
+  directory="curl-8.7.1"
+  file="curl-8.7.1.tar.gz"
+  url="https://curl.se/download"
+  pushd "${tempdir}" || exit
+  download_and_untar "${url}" "${file}" "${directory}"
+  pushd ${directory} || exit
+
+  ./configure --prefix="${install_prefix}" \
+    --disable-shared --enable-static --with-pic \
+    --with-openssl="${install_prefix}" \
+    --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
+    --with-ca-path=/etc/ssl/certs \
+    --with-ca-fallback \
+    --without-libssh2 --without-libpsl --without-brotli \
+    --without-zstd --without-nghttp2 --without-libidn2 \
+    --disable-ldap --disable-ldaps --disable-rtsp --disable-dict \
+    --disable-telnet --disable-tftp --disable-pop3 \
+    --disable-imap --disable-smb --disable-smtp \
+    --disable-gopher --disable-mqtt --disable-manual
+  make -j$(nproc)
+  make install
+  popd || exit
+  popd || exit
+  rm -rf "${tempdir:?}/${directory:?}" "${tempdir:?}/${file:?}"
+}
+
+INTERACTIVE_MACOS=("xsimd" "cmake")
 INTERACTIVE_UBUNTU=("cmake" "libssl-dev") # levedb for brpc
 
 install_neug_dependencies() {
@@ -327,6 +364,7 @@ install_neug_dependencies() {
   if [[ "${OS_PLATFORM}" == *"Darwin"* ]]; then
     brew install ${INTERACTIVE_MACOS[*]}
     install_openssl
+    install_curl
   elif [[ "${OS_PLATFORM}" == *"Ubuntu"* ]]; then
     DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC ${SUDO} apt-get install -y ${INTERACTIVE_UBUNTU[*]}
     ${SUDO} sh -c 'echo "fs.aio-max-nr = 1048576" >> /etc/sysctl.conf'
@@ -337,6 +375,7 @@ install_neug_dependencies() {
       source /opt/rh/devtoolset-10/enable
     fi
     install_openssl
+    install_curl
   fi
 
   if [[ "${CI:-OFF}" == "ON" ]]; then
@@ -356,7 +395,9 @@ write_env_config() {
     echo "export DYLD_LIBRARY_PATH=${LD_LIBRARY_PATH}:\${DYLD_LIBRARY_PATH}"
   } >> "${OUTPUT_ENV_FILE}"
   {
-    if [[ "${OS_PLATFORM}" == *"CentOS"* || "${OS_PLATFORM}" == *"Aliyun"* ]]; then
+    if [[ "${OS_PLATFORM}" == *"Darwin"* ]]; then
+      echo "export OPENSSL_ROOT_DIR=${HOMEBREW_PREFIX}/opt/openssl@3"
+    elif [[ "${OS_PLATFORM}" == *"CentOS"* || "${OS_PLATFORM}" == *"Aliyun"* ]]; then
       if [[ "${OS_VERSION}" -eq "7" ]]; then
         echo "source /opt/rh/devtoolset-10/enable"
         echo "source /opt/rh/rh-python38/enable"

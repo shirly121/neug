@@ -102,12 +102,12 @@ class BindedPathVerticesPropsExpr : public RecordExprBase {
           static_cast<label_t>(vertex.label()));
       auto it = std::find(prop_names.begin(), prop_names.end(), prop_);
       if (it == prop_names.end()) {
-        prop_values.push_back(Value(type_));  // null value
+        prop_values.push_back(Value(elem_type_));  // null value
       } else {
         int prop_id = std::distance(prop_names.begin(), it);
-        Property prop =
+        Value prop =
             graph_.GetVertexProperty(vertex.label(), vertex.vid(), prop_id);
-        prop_values.emplace_back(property_to_value(prop));
+        prop_values.emplace_back(std::move(prop));
       }
     }
     return Value::LIST(elem_type_, std::move(prop_values));
@@ -143,15 +143,14 @@ class BindedPathEdgesPropsExpr : public RecordExprBase {
           edge.label.src_label, edge.label.dst_label, edge.label.edge_label);
       auto it = std::find(prop_names.begin(), prop_names.end(), prop_);
       if (it == prop_names.end()) {
-        prop_values.push_back(Value(type_));  // null value
+        prop_values.push_back(Value(elem_type_));  // null value
       } else {
         int prop_id = std::distance(prop_names.begin(), it);
         const auto& accessor = graph_.GetEdgeDataAccessor(
             edge.label.src_label, edge.label.dst_label, edge.label.edge_label,
             prop_id);
 
-        prop_values.emplace_back(
-            property_to_value(accessor.get_data_from_ptr(edge.prop)));
+        prop_values.emplace_back(accessor.get_data_from_ptr(edge.prop));
       }
     }
     return Value::LIST(elem_type_, std::move(prop_values));

@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+#include "neug/execution/common/types/value.h"
 #include "neug/neug.h"
 #include "neug/server/neug_db_service.h"
-#include "neug/storages/csr/generic_view_utils.h"
+#include "neug/storages/csr/csr_view_utils.h"
 #include "neug/storages/graph/graph_interface.h"
 #include "neug/transaction/insert_transaction.h"
 
@@ -26,7 +27,7 @@
 class InsertTransactionTest : public ::testing::Test {
  protected:
   std::string db_dir;
-  int memory_level;
+  neug::MemoryLevel memory_level;
 
   void SetUp() override {
     db_dir = "/tmp/test_insert_transaction_db";
@@ -37,7 +38,7 @@ class InsertTransactionTest : public ::testing::Test {
 
     neug::NeugDB db;
     neug::NeugDBConfig config(db_dir);
-    config.memory_level = 1;
+    config.memory_level = neug::MemoryLevel::kInMemory;
     config.checkpoint_on_close = true;
     db.Open(db_dir);
     auto conn = db.Connect();
@@ -91,21 +92,21 @@ class InsertTransactionTest : public ::testing::Test {
 TEST_F(InsertTransactionTest, InsertTransactionBasic) {
   neug::NeugDB db;
   neug::NeugDBConfig config(db_dir);
-  config.memory_level = 1;
+  config.memory_level = neug::MemoryLevel::kInMemory;
   db.Open(config);
   auto svc = std::make_shared<neug::NeugDBService>(db);
   {
     auto sess = svc->AcquireSession();
     auto txn = sess->GetInsertTransaction();
     EXPECT_EQ(txn.timestamp(), 1);
-    EXPECT_TRUE(txn.schema().contains_vertex_label("person"));
+    EXPECT_TRUE(txn.schema().is_vertex_label_valid("person"));
   }
 }
 
 TEST_F(InsertTransactionTest, AddVertex) {
   neug::NeugDB db;
   neug::NeugDBConfig config(db_dir);
-  config.memory_level = 1;
+  config.memory_level = neug::MemoryLevel::kInMemory;
   db.Open(config);
   auto svc = std::make_shared<neug::NeugDBService>(db);
   {
@@ -114,10 +115,11 @@ TEST_F(InsertTransactionTest, AddVertex) {
     neug::StorageTPInsertInterface interface(txn);
     auto person_label = interface.schema().get_vertex_label_id("person");
     neug::vid_t vid;
-    EXPECT_TRUE(interface.AddVertex(person_label, neug::Property::from_int64(3),
-                                    {neug::Property::from_string_view("Eve"),
-                                     neug::Property::from_int64(28)},
-                                    vid));
+    EXPECT_TRUE(
+        interface.AddVertex(person_label, neug::execution::Value::INT64(3),
+                            {neug::execution::Value::STRING(std::string("Eve")),
+                             neug::execution::Value::INT64(28)},
+                            vid));
     EXPECT_TRUE(txn.Commit());
   }
   {
@@ -133,7 +135,7 @@ TEST_F(InsertTransactionTest, AddVertex) {
 TEST_F(InsertTransactionTest, AddEdge) {
   neug::NeugDB db;
   neug::NeugDBConfig config(db_dir);
-  config.memory_level = 1;
+  config.memory_level = neug::MemoryLevel::kInMemory;
   db.Open(config);
   auto svc = std::make_shared<neug::NeugDBService>(db);
   {
@@ -144,14 +146,17 @@ TEST_F(InsertTransactionTest, AddEdge) {
     auto software_label = txn.schema().get_vertex_label_id("software");
     auto created_label = txn.schema().get_edge_label_id("created");
     neug::vid_t vid;
-    EXPECT_TRUE(
-        txn.GetVertexIndex(person_label, neug::Property::from_int64(1), vid));
+    EXPECT_TRUE(txn.GetVertexIndex(person_label,
+                                   neug::execution::Value::INT64(1), vid));
     neug::vid_t vid2;
     EXPECT_TRUE(txn.GetVertexIndex(software_label,
-                                   neug::Property::from_int64(2), vid2));
-    EXPECT_TRUE(interface.AddEdge(
-        person_label, vid, software_label, vid2, created_label,
-        {neug::Property::from_double(0.9), neug::Property::from_int64(2022)}));
+                                   neug::execution::Value::INT64(2), vid2));
+    const void* edge_prop = nullptr;
+    EXPECT_TRUE(interface.AddEdge(person_label, vid, software_label, vid2,
+                                  created_label,
+                                  {neug::execution::Value::DOUBLE(0.9),
+                                   neug::execution::Value::INT64(2022)},
+                                  edge_prop));
     EXPECT_TRUE(txn.Commit());
   }
   {
@@ -168,7 +173,7 @@ TEST_F(InsertTransactionTest, AddEdge) {
     auto vertex_set = gi.GetVertexSet(person_label);
     for (neug::vid_t vid : vertex_set) {
       auto oid = gi.GetVertexId(person_label, vid);
-      if (oid.as_int64() == 1) {
+      if (oid.GetValue<int64_t>() == 1) {
         auto edge_iter = view.get_edges(vid);
         for (auto it = edge_iter.begin(); it != edge_iter.end(); ++it) {
           edge_count++;
@@ -183,7 +188,7 @@ TEST_F(InsertTransactionTest, AddEdge) {
 TEST_F(InsertTransactionTest, TestUnsupportedInterface) {
   neug::NeugDB db;
   neug::NeugDBConfig config(db_dir);
-  config.memory_level = 1;
+  config.memory_level = neug::MemoryLevel::kInMemory;
   db.Open(config);
   auto svc = std::make_shared<neug::NeugDBService>(db);
 

@@ -66,8 +66,8 @@ std::shared_ptr<arrow::Schema> createSchema(const EntrySchema& entrySchema) {
   return std::make_shared<arrow::Schema>(fields);
 }
 
-bool ArrowOptionsBuilder::skipColumns(ArrowOptions& options) {
-  if (state->skipColumns.empty()) {
+bool ArrowOptionsBuilder::projectColumns(ArrowOptions& options) {
+  if (state->projectColumns.empty()) {
     return true;
   }
 
@@ -80,26 +80,19 @@ bool ArrowOptionsBuilder::skipColumns(ArrowOptions& options) {
   }
 
   const EntrySchema& entrySchema = *state->schema.entry;
-
-  // Build projection columns excluding skipped ones
-  std::vector<std::string> project_columns;
+  const auto& columns = state->projectColumns;
   const auto& allColumnNames = entrySchema.columnNames;
-  project_columns.reserve(allColumnNames.size());
-  for (const auto& name : allColumnNames) {
-    if (std::find(state->skipColumns.begin(), state->skipColumns.end(), name) ==
-        state->skipColumns.end()) {
-      project_columns.push_back(name);
+  for (const auto& column : columns) {
+    if (std::find(allColumnNames.begin(), allColumnNames.end(), column) ==
+        allColumnNames.end()) {
+      THROW_INVALID_ARGUMENT_EXCEPTION("Column not found in entry schema: " +
+                                       column);
     }
   }
 
-  if (project_columns.empty()) {
-    THROW_INVALID_ARGUMENT_EXCEPTION(
-        "Empty project columns after column pruning");
-  }
-
   auto dataset_schema = createSchema(entrySchema);
-  auto project_desc = arrow::dataset::ProjectionDescr::FromNames(
-      project_columns, *dataset_schema);
+  auto project_desc =
+      arrow::dataset::ProjectionDescr::FromNames(columns, *dataset_schema);
   if (!project_desc.ok()) {
     LOG(ERROR) << "Failed to build projection: "
                << project_desc.status().message();
@@ -132,6 +125,16 @@ ArrowOptions ArrowCsvOptionsBuilder::build() const {
   }
 
   auto scanOptions = std::make_shared<arrow::dataset::ScanOptions>();
+
+  // Set dataset_schema from entry schema when available, so that
+  // factory->Finish(schema) is used instead of factory->Finish() which
+  // triggers Inspect(). Inspect() reads block_size bytes from the file just
+  // to re-infer a schema we already know, causing massive memory allocation
+  // when block_size is large (e.g., 256MB block_size → 3.6GB allocation).
+  if (state->schema.entry && !state->schema.entry->columnNames.empty() &&
+      !state->schema.entry->columnTypes.empty()) {
+    scanOptions->dataset_schema = createSchema(*state->schema.entry);
+  }
 
   // Build format-specific fragment scan options
   auto fragment_scan_options = buildFragmentOptions();

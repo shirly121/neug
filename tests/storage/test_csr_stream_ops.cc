@@ -17,8 +17,10 @@
 #include <thread>
 #include <vector>
 
+#include "neug/storages/allocators.h"
+#include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/csr/mutable_csr.h"
-#include "neug/utils/allocators.h"
+#include "neug/storages/module_descriptor.h"
 #include "unittest/utils.h"
 
 using StreamCsrTypes = ::testing::Types<
@@ -41,10 +43,7 @@ class CsrStreamTest : public ::testing::Test {
     if (std::filesystem::exists(temp_dir_)) {
       std::filesystem::remove_all(temp_dir_);
     }
-    std::filesystem::create_directories(temp_dir_);
-    std::filesystem::create_directories(temp_dir_ / "snapshot");
-    std::filesystem::create_directories(temp_dir_ / "work");
-    std::filesystem::create_directories(temp_dir_ / "work" / "runtime" / "tmp");
+    ws.Open(temp_dir_.string());
   }
 
   void TearDown() override {
@@ -53,26 +52,7 @@ class CsrStreamTest : public ::testing::Test {
     }
   }
 
-  std::filesystem::path WorkDirectory() const { return temp_dir_ / "work"; }
-  std::filesystem::path SnapshotDirectory() const {
-    return temp_dir_ / "snapshot";
-  }
-
-  void CreateDirectory(const std::string& name) {
-    std::filesystem::create_directories(temp_dir_ / name);
-  }
-
-  std::filesystem::path GetDirectory(const std::string& name) const {
-    return temp_dir_ / name;
-  }
-
-  void ClearWorkDirectory() {
-    auto work_dir = WorkDirectory();
-    if (std::filesystem::exists(work_dir)) {
-      std::filesystem::remove_all(work_dir);
-    }
-    std::filesystem::create_directories(work_dir);
-  }
+  neug::CheckpointManager& Workspace() { return ws; }
 
   void CheckEqual(const std::vector<std::tuple<neug::vid_t, neug::vid_t,
                                                typename T::data_t>>& expected,
@@ -109,14 +89,17 @@ class CsrStreamTest : public ::testing::Test {
       int thread_num, neug::timestamp_t start_ts) {
     std::vector<std::thread> threads;
     if (this->allocators.size() < static_cast<size_t>(thread_num)) {
-      this->allocators.resize(
-          thread_num, neug::Allocator(neug::MemoryStrategy::kMemoryOnly, ""));
+      this->allocators.resize(thread_num);
+      for (int i = 0; i < thread_num; ++i) {
+        this->allocators[i] =
+            std::make_unique<neug::Allocator>(neug::MemoryLevel::kInMemory, "");
+      }
     }
     std::atomic<size_t> counter(0);
     for (int i = 0; i < thread_num; ++i) {
       threads.emplace_back(
           [this, &counter, &edges, start_ts](int thread_idx) {
-            auto& alloc = this->allocators[thread_idx];
+            auto& alloc = *(this->allocators[thread_idx]);
             while (true) {
               size_t cur = counter.fetch_add(1);
               if (cur >= edges.size()) {
@@ -136,10 +119,11 @@ class CsrStreamTest : public ::testing::Test {
   }
 
   std::unique_ptr<CsrType> csr = nullptr;
-  std::vector<neug::Allocator> allocators;
+  std::vector<std::unique_ptr<neug::Allocator>> allocators;
 
  private:
   std::filesystem::path temp_dir_;
+  neug::CheckpointManager ws;
 
   std::string GetTestName() const {
     const testing::TestInfo* const test_info =
@@ -175,14 +159,12 @@ generate_two_part_edges(neug::vid_t src_num, neug::vid_t dst_num,
 }
 
 TYPED_TEST(CsrStreamTest, ParallelInsertMemoryEmpty) {
-  auto work_dir = this->WorkDirectory();
-  auto snapshot_dir = this->SnapshotDirectory();
-
   auto edges = generate_random_edges<typename TypeParam::data_t>(
       1000, 1000, 20000,
       this->csr->csr_type() == neug::CsrType::kSingleMutable);
 
-  this->csr->open_in_memory(snapshot_dir.string() + "/csr");
+  auto ckp = make_checkpoint(this->Workspace());
+  this->csr->Open(*ckp, neug::ModuleDescriptor(), neug::MemoryLevel::kInMemory);
   this->csr->resize(1000);
 
   auto ts = this->ParallelInsert(edges, 16, 1);
@@ -192,14 +174,13 @@ TYPED_TEST(CsrStreamTest, ParallelInsertMemoryEmpty) {
 }
 
 TYPED_TEST(CsrStreamTest, ParallelInsertFileEmpty) {
-  auto work_dir = this->WorkDirectory();
-  auto snapshot_dir = this->SnapshotDirectory();
-
   auto edges = generate_random_edges<typename TypeParam::data_t>(
       1000, 1000, 20000,
       this->csr->csr_type() == neug::CsrType::kSingleMutable);
 
-  this->csr->open("csr", snapshot_dir.string(), work_dir.string());
+  auto ckp = make_checkpoint(this->Workspace());
+  this->csr->Open(*ckp, neug::ModuleDescriptor(),
+                  neug::MemoryLevel::kSyncToFile);
   this->csr->resize(1000);
 
   auto ts = this->ParallelInsert(edges, 16, 1);
@@ -209,9 +190,6 @@ TYPED_TEST(CsrStreamTest, ParallelInsertFileEmpty) {
 }
 
 TYPED_TEST(CsrStreamTest, ParallelInsertMemory) {
-  auto work_dir = this->WorkDirectory();
-  auto snapshot_dir = this->SnapshotDirectory();
-
   auto pair = generate_two_part_edges<typename TypeParam::data_t>(
       1000, 1000, 20000, 0.6,
       this->csr->csr_type() == neug::CsrType::kSingleMutable);
@@ -226,7 +204,8 @@ TYPED_TEST(CsrStreamTest, ParallelInsertMemory) {
     data_list.push_back(std::get<2>(e));
   }
 
-  this->csr->open_in_memory(snapshot_dir.string() + "/csr");
+  auto ckp = make_checkpoint(this->Workspace());
+  this->csr->Open(*ckp, neug::ModuleDescriptor(), neug::MemoryLevel::kInMemory);
   this->csr->resize(1000);
   this->csr->batch_put_edges(src_list, dst_list, data_list, 0);
   std::sort(init_edges.begin(), init_edges.end());
@@ -242,9 +221,6 @@ TYPED_TEST(CsrStreamTest, ParallelInsertMemory) {
 }
 
 TYPED_TEST(CsrStreamTest, ParallelInsertFile) {
-  auto work_dir = this->WorkDirectory();
-  auto snapshot_dir = this->SnapshotDirectory();
-
   auto pair = generate_two_part_edges<typename TypeParam::data_t>(
       1000, 1000, 20000, 0.6,
       this->csr->csr_type() == neug::CsrType::kSingleMutable);
@@ -259,7 +235,9 @@ TYPED_TEST(CsrStreamTest, ParallelInsertFile) {
     data_list.push_back(std::get<2>(e));
   }
 
-  this->csr->open("csr", snapshot_dir.string(), work_dir.string());
+  auto ckp = make_checkpoint(this->Workspace());
+  this->csr->Open(*ckp, neug::ModuleDescriptor(),
+                  neug::MemoryLevel::kSyncToFile);
   this->csr->resize(1000);
   this->csr->batch_put_edges(src_list, dst_list, data_list, 0);
   std::sort(init_edges.begin(), init_edges.end());

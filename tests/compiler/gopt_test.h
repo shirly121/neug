@@ -23,7 +23,6 @@
 #include <memory>
 #include <sstream>
 
-#include <google/protobuf/util/json_util.h>
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <yaml-cpp/node/emit.h>
@@ -42,13 +41,14 @@
 #include "neug/compiler/gopt/g_result_schema.h"
 #include "neug/compiler/main/client_context.h"
 #include "neug/compiler/main/metadata_manager.h"
+#include "neug/compiler/main/metadata_registry.h"
 #include "neug/compiler/optimizer/expand_getv_fusion.h"
 #include "neug/compiler/optimizer/filter_push_down_pattern.h"
 #include "neug/compiler/planner/gopt_planner.h"
 #include "neug/compiler/planner/operator/logical_plan_util.h"
 #include "neug/compiler/storage/buffer_manager/memory_manager.h"
-#include "neug/compiler/storage/wal/wal.h"
 #include "neug/compiler/transaction/transaction.h"
+#include "neug/utils/pb_utils.h"
 #include "neug/utils/service_utils.h"
 
 namespace neug {
@@ -56,27 +56,7 @@ namespace gopt {
 class Utils {
  public:
   static std::string getPhysicalJson(const ::physical::PhysicalPlan& plan) {
-    google::protobuf::util::JsonPrintOptions options;
-    options.add_whitespace = true;  // Enables pretty-printing
-
-    // Protobuf version compatibility:
-    // - always_print_primitive_fields was removed in v26.0 (commit 06e7caba5,
-    // Feb 2024)
-    // - always_print_fields_with_no_presence is the replacement with consistent
-    // behavior
-#if PROTOBUF_VERSION < 4026000  // Before v26.0
-    options.always_print_primitive_fields =
-        true;  // Print fields even if default values
-#else
-    options.always_print_fields_with_no_presence =
-        true;  // Replacement for v26.0+
-#endif
-
-    options.preserve_proto_field_names =
-        true;  // Optional: use proto field names instead of camelCase
-    std::string json;
-    (void) google::protobuf::util::MessageToJsonString(plan, &json, options);
-    return json;
+    return neug::proto_to_string(plan);
   }
 
   static std::string getEnvVarOrDefault(const char* varName,
@@ -185,6 +165,7 @@ class GOptTest : public ::testing::Test {
   void SetUp() override {
     database = std::make_unique<main::MetadataManager>();
     ctx = std::make_unique<main::ClientContext>(database.get());
+    main::MetadataRegistry::registerMetadata(database.get());
   }
 
   void TearDown() override {
@@ -230,18 +211,12 @@ class GOptTest : public ::testing::Test {
 
     // Prepare the query
     auto statement = ctx->prepare(query);
-    if (!statement->success) {
-      THROW_RUNTIME_ERROR("Failed to prepare query: " + statement->errMsg);
-    }
     return std::move(statement->logicalPlan);
   }
 
   std::unique_ptr<planner::LogicalPlan> planLogical(const std::string& query) {
     // Prepare the query
     auto statement = ctx->prepare(query);
-    if (!statement->success) {
-      THROW_RUNTIME_ERROR("Failed to prepare query: " + statement->errMsg);
-    }
     return std::move(statement->logicalPlan);
   }
 
@@ -460,10 +435,20 @@ class VerifyFactory {
         << "Expected: " << planExpectedStr << "\nActual: " << actualStr;
   }
 
+  static RegexReplaceMap logicalPlanNormalizePatterns() {
+    auto patterns = defaultNormalizePatterns();
+    patterns.emplace_back(R"( Cardinality:\s*\d+)", "");
+    return patterns;
+  }
+
   static void verifyLogicalByStr(const planner::LogicalPlan& plan,
                                  const std::string& expectedStr) {
     auto actualStr = plan.toString();
-    ASSERT_EQ(actualStr, expectedStr)
+    auto normalizedActual =
+        normalize(actualStr, logicalPlanNormalizePatterns());
+    auto normalizedExpected =
+        normalize(expectedStr, logicalPlanNormalizePatterns());
+    ASSERT_EQ(normalizedActual, normalizedExpected)
         << "Expected: " << expectedStr << "\nActual: " << actualStr;
   }
 

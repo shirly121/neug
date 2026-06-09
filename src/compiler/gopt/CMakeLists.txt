@@ -8,10 +8,8 @@ add_library(neug_gopt
     g_type_registration.cpp
     g_query_converter.cpp
     g_precedence.cpp
-    g_catalog_holder.cpp
-    g_vfs_holder.cpp
 )
-add_dependencies(neug_gopt neug_plan_proto)
+add_dependencies(neug_gopt neug_proto)
 
 
 set(ALL_OBJECT_FILES

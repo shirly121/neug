@@ -45,7 +45,7 @@ neug::result<Context> EdgeExpand::expand_degree(
   auto vertex_col =
       dynamic_cast<const IVertexColumn*>(ctx.get(params.v_tag).get());
 
-  std::unordered_map<label_t, std::vector<GenericView>> mps;
+  std::unordered_map<label_t, std::vector<CsrView>> mps;
   const auto& vertex_labels = vertex_col->get_labels_set();
   for (auto label : params.labels) {
     if (params.dir == Direction::kOut || params.dir == Direction::kBoth) {
@@ -69,6 +69,9 @@ neug::result<Context> EdgeExpand::expand_degree(
   }
   foreach_vertex(*vertex_col, [&](size_t index, label_t label, vid_t v) {
     int64_t degree = 0;
+    if (v == graph.kInvalidVid) {
+      return;
+    }
     if (mps.count(label)) {
       for (auto& view : mps.at(label)) {
         auto es = view.get_edges(v);
@@ -86,6 +89,55 @@ neug::result<Context> EdgeExpand::expand_degree(
   });
   ctx.set_with_reshuffle(params.alias, builder.finish(), shuffle_offset);
   return ctx;
+}
+
+neug::result<Context> EdgeExpand::expand_count(
+    const StorageReadInterface& graph, Context&& ctx,
+    const EdgeExpandParams& params) {
+  auto vertex_col =
+      dynamic_cast<const IVertexColumn*>(ctx.get(params.v_tag).get());
+
+  std::unordered_map<label_t, std::vector<CsrView>> mps;
+  const auto& vertex_labels = vertex_col->get_labels_set();
+  for (auto label : params.labels) {
+    if (params.dir == Direction::kOut || params.dir == Direction::kBoth) {
+      if (vertex_labels.find(label.src_label) != vertex_labels.end()) {
+        mps[label.src_label].emplace_back(graph.GetGenericOutgoingGraphView(
+            label.src_label, label.dst_label, label.edge_label));
+      }
+    }
+    if (params.dir == Direction::kIn || params.dir == Direction::kBoth) {
+      if (vertex_labels.find(label.dst_label) != vertex_labels.end()) {
+        mps[label.dst_label].emplace_back(graph.GetGenericIncomingGraphView(
+            label.dst_label, label.src_label, label.edge_label));
+      }
+    }
+  }
+  ValueColumnBuilder<int64_t> builder;
+  Context ret;
+  int64_t degree = 0;
+  if (mps.empty()) {
+    builder.push_back_opt(degree);
+    ret.set(params.alias, builder.finish());
+    return ret;
+  }
+  foreach_vertex(*vertex_col, [&](size_t index, label_t label, vid_t v) {
+    if (v == graph.kInvalidVid) {
+      return;
+    }
+    if (mps.count(label)) {
+      for (auto& view : mps.at(label)) {
+        auto es = view.get_edges(v);
+        for (auto it = es.begin(); it != es.end(); ++it) {
+          ++degree;
+        }
+      }
+    }
+  });
+
+  builder.push_back_opt(degree);
+  ret.set(params.alias, builder.finish());
+  return ret;
 }
 
 template <typename CMP_T>
@@ -303,8 +355,8 @@ neug::result<Context> EdgeExpand::expand_vertex_ep_cmp(
     label_t input_label = casted_input_vertex_list->label();
     std::vector<std::tuple<label_t, label_t, Direction>> label_dirs;
     for (auto& triplet : params.labels) {
-      if (!graph.schema().exist(triplet.src_label, triplet.dst_label,
-                                triplet.edge_label)) {
+      if (!graph.schema().is_edge_triplet_valid(
+              triplet.src_label, triplet.dst_label, triplet.edge_label)) {
         continue;
       }
       if (triplet.src_label == input_label &&

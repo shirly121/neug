@@ -33,6 +33,13 @@ function(build_arrow_as_third_party)
     check_cxx_compiler_flag("-Wno-error=stringop-overflow" COMPILER_SUPPORTS_STRINGOP_OVERFLOW_FLAG)
     check_cxx_compiler_flag("-Wno-array-bounds" COMPILER_SUPPORTS_ARRAY_BOUNDS_FLAG)
     check_cxx_compiler_flag("-Wno-error=uninitialized" COMPILER_SUPPORTS_NO_ERROR_UNINITIALIZED_FLAG)
+    # stringop-truncation is GCC-only; Clang errors on it under -Werror (which
+    # AWS SDK enables in its own compiler_settings.cmake). Probe under -Werror
+    # so the check matches how nested sub-builds will see the flag.
+    set(_saved_required_flags "${CMAKE_REQUIRED_FLAGS}")
+    set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -Werror")
+    check_cxx_compiler_flag("-Wno-error=stringop-truncation" COMPILER_SUPPORTS_STRINGOP_TRUNCATION_FLAG)
+    set(CMAKE_REQUIRED_FLAGS "${_saved_required_flags}")
     if (COMPILER_SUPPORTS_SIGN_COMPARE_FLAG)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-sign-compare")
     endif()
@@ -52,6 +59,11 @@ function(build_arrow_as_third_party)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=uninitialized")
     endif()
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    # Thrift (Arrow-parquet dependency) emits these warnings
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=unused-function")
+    if (COMPILER_SUPPORTS_STRINGOP_TRUNCATION_FLAG)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=stringop-truncation")
+    endif()
 
     set(ARROW_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(ARROW_BUILD_STATIC ON CACHE BOOL "" FORCE)
@@ -72,15 +84,74 @@ function(build_arrow_as_third_party)
     if(NOT DEFINED ARROW_JSON)
         set(ARROW_JSON OFF CACHE BOOL "" FORCE)
     endif()
-    set(ARROW_PARQUET OFF CACHE BOOL "" FORCE)
-    set(ARROW_PLASMA OFF CACHE BOOL "" FORCE)
-    set(ARROW_PYTHON OFF CACHE BOOL "" FORCE)
-    set(ARROW_S3 OFF CACHE BOOL "" FORCE)
+    # Translate ARROW_ENABLE_PARQUET (our flag set in CMakeLists.txt) to Arrow's
+    # own ARROW_PARQUET variable so Arrow actually builds Parquet support.
+    if(ARROW_ENABLE_PARQUET)
+        set(ARROW_PARQUET ON CACHE BOOL "" FORCE)
+    else()
+        set(ARROW_PARQUET OFF CACHE BOOL "" FORCE)
+    endif()
+    if(ARROW_ENABLE_S3)
+        set(ARROW_S3 ON CACHE BOOL "" FORCE)
+        # Prefer the static libcurl built by scripts/install_deps.sh under the
+        # install prefix (e.g. /opt/neug).  Linking Arrow against this static
+        # libcurl, which is itself linked against the bundled static OpenSSL
+        # 1.1.1k, lets the resulting extension be free of the system libcurl /
+        # system OpenSSL 3.0 dependency at runtime and avoid TLS symbol
+        # conflicts with Arrow's bundled aws-lc/BoringSSL.
+        foreach(_curl_prefix IN LISTS CMAKE_PREFIX_PATH)
+            if(NOT CURL_LIBRARY AND EXISTS "${_curl_prefix}/lib/libcurl.a")
+                set(CURL_LIBRARY "${_curl_prefix}/lib/libcurl.a" CACHE FILEPATH "" FORCE)
+            endif()
+            if(NOT CURL_LIBRARY AND EXISTS "${_curl_prefix}/lib64/libcurl.a")
+                set(CURL_LIBRARY "${_curl_prefix}/lib64/libcurl.a" CACHE FILEPATH "" FORCE)
+            endif()
+            if(NOT CURL_INCLUDE_DIR AND EXISTS "${_curl_prefix}/include/curl/curl.h")
+                set(CURL_INCLUDE_DIR "${_curl_prefix}/include" CACHE PATH "" FORCE)
+            endif()
+        endforeach()
+        unset(_curl_prefix)
+        # On Debian/Ubuntu multiarch, headers and libraries live under
+        # /usr/include/<triplet>/ and /usr/lib/<triplet>/ which CMake's
+        # FindCURL may not search by default.  Use CMAKE_LIBRARY_ARCHITECTURE
+        # (auto-detected triplet, e.g. x86_64-linux-gnu or aarch64-linux-gnu).
+        if(CMAKE_LIBRARY_ARCHITECTURE)
+            set(_curl_multiarch_inc "/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}")
+            set(_curl_multiarch_lib "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+            if(NOT CURL_INCLUDE_DIR AND EXISTS "${_curl_multiarch_inc}/curl/curl.h")
+                set(CURL_INCLUDE_DIR "${_curl_multiarch_inc}" CACHE PATH "" FORCE)
+            endif()
+            if(NOT CURL_LIBRARY AND EXISTS "${_curl_multiarch_lib}/libcurl.so")
+                set(CURL_LIBRARY "${_curl_multiarch_lib}/libcurl.so" CACHE FILEPATH "" FORCE)
+            endif()
+            unset(_curl_multiarch_inc)
+            unset(_curl_multiarch_lib)
+        endif()
+        # Fail fast with a clear message before Arrow's bundled S3 toolchain
+        # emits a generic "Could NOT find CURL" that hides the real cause.
+        # See issue 480.
+        if(NOT (CURL_LIBRARY AND CURL_INCLUDE_DIR))
+            find_package(CURL QUIET)
+            if(NOT CURL_FOUND)
+                message(FATAL_ERROR
+                    "The 'httpfs' extension requires libcurl development "
+                    "headers (e.g. libcurl4-openssl-dev on Debian/Ubuntu, "
+                    "libcurl-devel on RHEL). Install it, or drop 'httpfs' "
+                    "from -DBUILD_EXTENSIONS.")
+            endif()
+        endif()
+    else()
+        set(ARROW_S3 OFF CACHE BOOL "" FORCE)
+    endif()
+    # Enable Snappy and Zlib
+    set(ARROW_WITH_SNAPPY ON CACHE BOOL "" FORCE)
+    set(ARROW_WITH_ZLIB ON CACHE BOOL "" FORCE)
     set(ARROW_WITH_BZ2 OFF CACHE BOOL "" FORCE)
     set(ARROW_WITH_LZ4 OFF CACHE BOOL "" FORCE)
-    set(ARROW_WITH_SNAPPY OFF CACHE BOOL "" FORCE)
-    set(ARROW_WITH_ZSTD OFF CACHE BOOL "" FORCE)
+    set(ARROW_WITH_ZSTD ON CACHE BOOL "" FORCE)
     set(ARROW_WITH_BROTLI OFF CACHE BOOL "" FORCE)
+    set(ARROW_PLASMA OFF CACHE BOOL "" FORCE)
+    set(ARROW_PYTHON OFF CACHE BOOL "" FORCE)
     set(ARROW_IPC ON CACHE BOOL "" FORCE)
     set(ARROW_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
     set(ARROW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -104,7 +175,6 @@ function(build_arrow_as_third_party)
         # Point Arrow to use the project's RapidJSON
         set(RapidJSON_ROOT "${CMAKE_SOURCE_DIR}/third_party/rapidjson" CACHE PATH "" FORCE)
     endif()
-    set(ARROW_WITH_ZLIB OFF CACHE BOOL "" FORCE)
     set(ARROW_ENABLE_THREADING ON CACHE BOOL "" FORCE)
 
     # Save original flags and set flags to suppress warnings for Arrow build
@@ -115,6 +185,12 @@ function(build_arrow_as_third_party)
 	if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
 		cmake_policy(SET CMP0135 NEW)
 	endif()
+
+    # CMake 3.30+ introduced CMP0169 which deprecates FetchContent_Populate() with declared details.
+    # CMake 4.x made it an error by default. Set to OLD to preserve the existing pattern.
+    if(POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif()
 
     message(STATUS "Fetching Arrow ${ARROW_VERSION} from ${ARROW_SOURCE_URL}")
 
@@ -127,6 +203,40 @@ function(build_arrow_as_third_party)
     FetchContent_GetProperties(Arrow)
     if(NOT arrow_POPULATED)
         FetchContent_Populate(Arrow)
+        # CMake 4.x removed support for cmake_minimum_required < 3.5.
+        # Arrow's bundled ExternalProjects (e.g. snappy) use EP_COMMON_CMAKE_ARGS
+        # which is built inside Arrow's ThirdpartyToolchain.cmake. We patch that
+        # file after fetch to append -DCMAKE_POLICY_VERSION_MINIMUM=3.5 so every
+        # ExternalProject sub-build can configure under CMake 4.x.
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
+            set(_toolchain "${arrow_SOURCE_DIR}/cpp/cmake_modules/ThirdpartyToolchain.cmake")
+            file(READ "${_toolchain}" _toolchain_content)
+            string(FIND "${_toolchain_content}" "CMAKE_POLICY_VERSION_MINIMUM" _already_patched)
+            if(_already_patched EQUAL -1)
+                string(REPLACE
+                    "# if building with a toolchain file, pass that through"
+                    "# CMake 4.x: inject CMAKE_POLICY_VERSION_MINIMUM into all ExternalProject builds\nlist(APPEND EP_COMMON_CMAKE_ARGS \"-DCMAKE_POLICY_VERSION_MINIMUM=3.5\")\n\n# if building with a toolchain file, pass that through"
+                    _toolchain_content "${_toolchain_content}")
+                file(WRITE "${_toolchain}" "${_toolchain_content}")
+                message(STATUS "Patched Arrow ThirdpartyToolchain.cmake for CMake 4.x compatibility")
+            endif()
+        endif()
+        # Propagate CMAKE_OSX_ARCHITECTURES into Arrow's bundled ExternalProject
+        # sub-builds (snappy, zlib, zstd, etc.) so they are compiled for the
+        # correct target architecture (e.g. arm64 on macos-15 / Apple Silicon).
+        if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+            set(_toolchain "${arrow_SOURCE_DIR}/cpp/cmake_modules/ThirdpartyToolchain.cmake")
+            file(READ "${_toolchain}" _toolchain_content)
+            string(FIND "${_toolchain_content}" "CMAKE_OSX_ARCHITECTURES_PROPAGATED" _arch_already_patched)
+            if(_arch_already_patched EQUAL -1)
+                string(REPLACE
+                    "# if building with a toolchain file, pass that through"
+                    "# Propagate OSX architecture to all bundled ExternalProject builds\n# CMAKE_OSX_ARCHITECTURES_PROPAGATED sentinel\nlist(APPEND EP_COMMON_CMAKE_ARGS \"-DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}\")\n\n# if building with a toolchain file, pass that through"
+                    _toolchain_content "${_toolchain_content}")
+                file(WRITE "${_toolchain}" "${_toolchain_content}")
+                message(STATUS "Patched Arrow ThirdpartyToolchain.cmake to propagate CMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}")
+            endif()
+        endif()
         add_subdirectory(${arrow_SOURCE_DIR}/cpp ${arrow_BINARY_DIR} EXCLUDE_FROM_ALL)
     endif()
 
@@ -134,24 +244,24 @@ function(build_arrow_as_third_party)
         # Try different possible Arrow target names
         if(TARGET Arrow::arrow_static)
             message(STATUS "Found Arrow::arrow_static target")
-            set(ARROW_LIB Arrow::arrow_static)
-            set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
+            set(ARROW_BASE_LIB Arrow::arrow_static)
+            set(ARROW_LIB ${ARROW_BASE_LIB})
         elseif(TARGET arrow_static)
             message(STATUS "Found arrow_static target")
-            set(ARROW_LIB arrow_static)
-            set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
+            set(ARROW_BASE_LIB arrow_static)
+            set(ARROW_LIB ${ARROW_BASE_LIB})
         elseif(TARGET Arrow::arrow)
             message(STATUS "Found Arrow::arrow target (using as fallback)")
-            set(ARROW_LIB Arrow::arrow)
-            set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
+            set(ARROW_BASE_LIB Arrow::arrow)
+            set(ARROW_LIB ${ARROW_BASE_LIB})
         elseif(TARGET arrow)
             message(STATUS "Found arrow target (using as fallback)")
-            set(ARROW_LIB arrow)
-            set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
+            set(ARROW_BASE_LIB arrow)
+            set(ARROW_LIB ${ARROW_BASE_LIB})
         elseif(TARGET arrow_shared)
             message(WARNING "Only found arrow_shared target, but we prefer static linking")
-            set(ARROW_LIB arrow_shared)
-            set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
+            set(ARROW_BASE_LIB arrow_shared)
+            set(ARROW_LIB ${ARROW_BASE_LIB})
         else()
             # List Arrow-related targets for debugging
             message(STATUS "Searching for Arrow targets...")
@@ -184,7 +294,6 @@ function(build_arrow_as_third_party)
 
         if(ARROW_ACERO_LIB)
             list(APPEND ARROW_LIB ${ARROW_ACERO_LIB})
-            set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
         endif()
 
         # Try different possible Arrow Dataset target names
@@ -205,14 +314,47 @@ function(build_arrow_as_third_party)
             set(ARROW_DATASET_LIB "")
         endif()
 
-        if(ARROW_DATASET_LIB) 
+        if(ARROW_DATASET_LIB)
             list(APPEND ARROW_LIB ${ARROW_DATASET_LIB})
-            set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
         endif()
 
         message(STATUS "Arrow source directory found: ${arrow_SOURCE_DIR}")
         include_directories(${arrow_SOURCE_DIR}/cpp/src
             ${arrow_BINARY_DIR}/src)
+
+        # Try different possible Arrow Parquet target names
+        if(TARGET Arrow::parquet_static)
+            message(STATUS "Found Arrow::parquet_static target")
+            set(ARROW_PARQUET_LIB Arrow::parquet_static)
+        elseif(TARGET arrow_parquet_static)
+            message(STATUS "Found arrow_parquet_static target")
+            set(ARROW_PARQUET_LIB arrow_parquet_static)
+        elseif(TARGET parquet_static)
+            message(STATUS "Found parquet_static target")
+            set(ARROW_PARQUET_LIB parquet_static)
+        elseif(TARGET Arrow::parquet)
+            message(STATUS "Found Arrow::parquet target (using as fallback)")
+            set(ARROW_PARQUET_LIB Arrow::parquet)
+        elseif(TARGET parquet)
+            message(STATUS "Found parquet target (using as fallback)")
+            set(ARROW_PARQUET_LIB parquet)
+        else()
+            message(WARNING "Arrow parquet target not found. Parquet symbols may be unresolved.")
+            set(ARROW_PARQUET_LIB "")
+        endif()
+
+        if(ARROW_PARQUET_LIB)
+            list(APPEND ARROW_LIB ${ARROW_PARQUET_LIB})
+        endif()
+
+        # Propagate individual component variables so that downstream targets
+        # (e.g. extensions) can link only the Arrow components they need,
+        # instead of the full ARROW_LIB list.
+        set(ARROW_BASE_LIB ${ARROW_BASE_LIB} PARENT_SCOPE)
+        set(ARROW_ACERO_LIB ${ARROW_ACERO_LIB} PARENT_SCOPE)
+        set(ARROW_DATASET_LIB ${ARROW_DATASET_LIB} PARENT_SCOPE)
+        set(ARROW_PARQUET_LIB ${ARROW_PARQUET_LIB} PARENT_SCOPE)
+        set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
 
         # Set additional Arrow variables for compatibility
         set(ARROW_FOUND TRUE PARENT_SCOPE)
@@ -221,23 +363,42 @@ function(build_arrow_as_third_party)
         set(ARROW_SOURCE_DIR ${arrow_SOURCE_DIR} PARENT_SCOPE)
         set(ARROW_BINARY_DIR ${arrow_BINARY_DIR} PARENT_SCOPE)
 
-        # Handle bundled dependencies if they exist
+        # Handle bundled dependencies.
+        # arrow_bundled_dependencies is an IMPORTED target (intentionally not
+        # GLOBAL) created inside Arrow's subdirectory scope.  It may or may
+        # not be visible here depending on CMake version / scope rules.
+        # We export the .a file path as ARROW_BUNDLED_DEPS_LIB so that each
+        # extension can PRIVATELY link it without changing target visibility.
+        set(_ARROW_BUNDLED_DEPS_LIB "")
         if(TARGET arrow_bundled_dependencies)
-            message(STATUS "arrow_bundled_dependencies found")
-            # Check if we have a static target to add dependencies to
+            message(STATUS "arrow_bundled_dependencies target found")
             if(TARGET arrow_static)
                 add_dependencies(arrow_static arrow_bundled_dependencies)
-            elseif(TARGET Arrow::arrow_static)
-                # Note: Cannot add dependencies to imported targets
-                message(STATUS "Arrow::arrow_static is imported, cannot add dependencies")
             endif()
-            
-            # Try to get the location and install if it's a real file
-            get_target_property(arrow_bundled_dependencies_location arrow_bundled_dependencies IMPORTED_LOCATION)
-            if(arrow_bundled_dependencies_location AND EXISTS ${arrow_bundled_dependencies_location})
-                install(FILES ${arrow_bundled_dependencies_location} DESTINATION lib)
+            get_target_property(_bundled_loc arrow_bundled_dependencies IMPORTED_LOCATION)
+            if(_bundled_loc)
+                set(_ARROW_BUNDLED_DEPS_LIB "${_bundled_loc}")
+                install(FILES "${_bundled_loc}" DESTINATION lib)
             endif()
         endif()
+        # Fallback: construct the expected path when the IMPORTED target is
+        # not visible in this scope.  The .a is generated at build time by
+        # Arrow's custom merge command (arrow_bundled_dependencies_merge,
+        # which IS a globally visible target), so we wire the build
+        # dependency through arrow_static to guarantee correct ordering.
+        if(NOT _ARROW_BUNDLED_DEPS_LIB)
+            string(TOLOWER "${CMAKE_BUILD_TYPE}" _arrow_bt_lower)
+            set(_bundled_candidate "${arrow_BINARY_DIR}/${_arrow_bt_lower}/libarrow_bundled_dependencies.a")
+            set(_ARROW_BUNDLED_DEPS_LIB "${_bundled_candidate}")
+            message(STATUS "arrow_bundled_dependencies path (constructed): ${_bundled_candidate}")
+            if(TARGET arrow_bundled_dependencies_merge AND TARGET arrow_static)
+                add_dependencies(arrow_static arrow_bundled_dependencies_merge)
+            endif()
+        endif()
+        if(_ARROW_BUNDLED_DEPS_LIB)
+            message(STATUS "Arrow bundled deps lib: ${_ARROW_BUNDLED_DEPS_LIB}")
+        endif()
+        set(ARROW_BUNDLED_DEPS_LIB "${_ARROW_BUNDLED_DEPS_LIB}" PARENT_SCOPE)
 
         # install the headers of arrow to system
         install(DIRECTORY ${arrow_SOURCE_DIR}/cpp/src/arrow
@@ -251,6 +412,21 @@ function(build_arrow_as_third_party)
             FILES_MATCHING PATTERN "*.h"
             PATTERN "test" EXCLUDE
             PATTERN "testing" EXCLUDE)
+
+        # Install Parquet headers if Parquet is enabled
+        if(ARROW_ENABLE_PARQUET)
+            install(DIRECTORY ${arrow_SOURCE_DIR}/cpp/src/parquet
+                DESTINATION include
+                FILES_MATCHING PATTERN "*.h"
+                PATTERN "test" EXCLUDE
+                PATTERN "testing" EXCLUDE)
+
+            install(DIRECTORY ${arrow_BINARY_DIR}/src/parquet
+                DESTINATION include
+                FILES_MATCHING PATTERN "*.h"
+                PATTERN "test" EXCLUDE
+                PATTERN "testing" EXCLUDE)
+        endif()
         
     else()
         # list(APPEND ICEBERG_SYSTEM_DEPENDENCIES Arrow)

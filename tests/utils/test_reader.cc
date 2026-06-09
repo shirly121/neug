@@ -15,6 +15,8 @@
 
 #include "test_reader.h"
 
+#include <arrow/array.h>
+
 namespace neug {
 namespace test {
 
@@ -154,11 +156,11 @@ TEST_F(ReaderTest, TestColumnPruning) {
   std::vector<std::shared_ptr<::common::DataType>> columnTypes = {
       createInt32Type(), createStringType(), createDoubleType()};
 
-  // Skip "name" column
-  std::vector<std::string> skipColumns = {"name"};
+  // Project only "id" and "score" columns (exclude "name")
+  std::vector<std::string> projectColumns = {"id", "score"};
   auto sharedState = createSharedState(
       "test6.csv", columnNames, columnTypes,
-      {{"skip_rows", "1"}, {"batch_read", "false"}}, skipColumns);
+      {{"skip_rows", "1"}, {"batch_read", "false"}}, projectColumns);
 
   auto reader = createArrowReader(sharedState);
 
@@ -213,13 +215,15 @@ TEST_F(ReaderTest, TestColumnPruningAndFilterPushdown) {
   std::vector<std::shared_ptr<::common::DataType>> columnTypes = {
       createInt32Type(), createStringType(), createDoubleType()};
 
-  // Skip "name" column and filter: score > 90.0
-  std::vector<std::string> skipColumns = {"name"};
+  // Project only "id" and "score" columns (exclude "name"), filter: score
+  // > 90.0
+  std::vector<std::string> projectColumns = {"id", "score"};
   auto filterExpr =
       createFilterExpression("score", ValueConverter::fromDouble(90.0));
-  auto sharedState = createSharedState(
-      "test8.csv", columnNames, columnTypes,
-      {{"skip_rows", "1"}, {"batch_read", "false"}}, skipColumns, filterExpr);
+  auto sharedState =
+      createSharedState("test8.csv", columnNames, columnTypes,
+                        {{"skip_rows", "1"}, {"batch_read", "false"}},
+                        projectColumns, filterExpr);
 
   auto reader = createArrowReader(sharedState);
 
@@ -340,6 +344,51 @@ TEST_F(ReaderTest, TestMultiColumnAndFilterPushdown) {
   // Should filter to 2 rows: Charlie (id=3, score=92.5) and Eve (id=5,
   // score=96.0)
   EXPECT_EQ(ctx.row_num(), 2);
+}
+
+// =============== JSON Reader ===============
+
+TEST_F(ReaderTest, TestBasicJsonRead) {
+  createJsonFile("test_json_basic.json",
+                 "{\"id\":1,\"name\":\"Alice\",\"score\":95.5}\n"
+                 "{\"id\":2,\"name\":\"Bob\",\"score\":87.0}\n");
+
+  std::vector<std::string> columnNames = {"id", "name", "score"};
+  std::vector<std::shared_ptr<::common::DataType>> columnTypes = {
+      createInt64Type(), createStringType(), createDoubleType()};
+
+  auto sharedState = createJsonSharedState(
+      "test_json_basic.json", columnNames, columnTypes,
+      {{"batch_read", "false"}});
+  auto reader = createArrowJsonReader(sharedState);
+
+  auto localState = std::make_shared<reader::ReadLocalState>();
+  execution::Context ctx;
+
+  reader->read(localState, ctx);
+
+  EXPECT_EQ(ctx.col_num(), 3);
+  EXPECT_EQ(ctx.row_num(), 2);
+}
+
+TEST_F(ReaderTest, TestJsonNonExistentColumnThrows) {
+  createJsonFile("test_json_nonexist.json",
+                 "{\"id\":1,\"name\":\"Alice\",\"score\":95.5}\n");
+
+  std::vector<std::string> columnNames = {"id", "name", "wrong_col"};
+  std::vector<std::shared_ptr<::common::DataType>> columnTypes = {
+      createInt64Type(), createStringType(), createDoubleType()};
+
+  auto sharedState = createJsonSharedState(
+      "test_json_nonexist.json", columnNames, columnTypes,
+      {{"batch_read", "false"}});
+  auto reader = createArrowJsonReader(sharedState);
+
+  auto localState = std::make_shared<reader::ReadLocalState>();
+  execution::Context ctx;
+
+  EXPECT_THROW(reader->read(localState, ctx),
+               exception::SchemaMismatchException);
 }
 
 // =============== Type Converter ===============

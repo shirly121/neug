@@ -219,7 +219,7 @@ static Status parse_vertex_files(
                   "Vertex label name is not set");
   }
   // Check label exists in schema
-  if (!schema.contains_vertex_label(label_name)) {
+  if (!schema.is_vertex_label_valid(label_name)) {
     LOG(ERROR) << "Vertex label [" << label_name << "] does not exist in "
                << "the schema";
     return Status(StatusCode::ERR_INVALID_ARGUMENT, "Vertex label [" +
@@ -371,7 +371,7 @@ static Status parse_edge_files(
 
   {
     // check whether src_label, dst_label and edge_label exist in schema
-    if (!schema.contains_vertex_label(src_label)) {
+    if (!schema.is_vertex_label_valid(src_label)) {
       LOG(ERROR) << "Vertex label [" << src_label << "] does not exist in "
                  << "the schema";
       return Status(StatusCode::ERR_INVALID_ARGUMENT, "Vertex label [" +
@@ -379,7 +379,7 @@ static Status parse_edge_files(
                                                           "] does not exist in "
                                                           "the schema");
     }
-    if (!schema.contains_vertex_label(dst_label)) {
+    if (!schema.is_vertex_label_valid(dst_label)) {
       LOG(ERROR) << "Vertex label [" << dst_label << "] does not exist in "
                  << "the schema";
       return Status(StatusCode::ERR_INVALID_ARGUMENT, "Vertex label [" +
@@ -387,7 +387,7 @@ static Status parse_edge_files(
                                                           "] does not exist in "
                                                           "the schema");
     }
-    if (!schema.has_edge_label(src_label, dst_label, edge_label)) {
+    if (!schema.has_edge_triplet(src_label, dst_label, edge_label)) {
       LOG(ERROR) << "Edge label [" << edge_label << "] does not exist in "
                  << "the schema";
       return Status(StatusCode::ERR_INVALID_ARGUMENT, "Edge label [" +
@@ -579,18 +579,6 @@ Status parse_bulk_load_config_yaml(const YAML::Node& root, const Schema& schema,
                      loader_options::PARALLELISM, load_config.parallelism_)) {
         VLOG(10) << "Parallelism is set to: " << load_config.parallelism_;
       }
-      if (get_scalar(loading_config_node["x_csr_params"],
-                     loader_options::BUILD_CSR_IN_MEM,
-                     load_config.build_csr_in_mem_)) {
-        VLOG(10) << "Build csr in memory is set to: "
-                 << load_config.build_csr_in_mem_;
-      }
-      if (get_scalar(loading_config_node["x_csr_params"],
-                     loader_options::USE_MMAP_VECTOR,
-                     load_config.use_mmap_vector_)) {
-        VLOG(10) << "Use mmap vector is set to: "
-                 << load_config.use_mmap_vector_;
-      }
     }
 
     RETURN_IF_NOT_OK(
@@ -762,9 +750,7 @@ LoadingConfig::LoadingConfig(const Schema& schema)
       scheme_("file"),
       method_(BulkLoadMethod::kInit),
       format_("csv"),
-      parallelism_(loader_options::DEFAULT_PARALLELISM),
-      build_csr_in_mem_(loader_options::DEFAULT_BUILD_CSR_IN_MEM),
-      use_mmap_vector_(loader_options::DEFAULT_USE_MMAP_VECTOR) {}
+      parallelism_(loader_options::DEFAULT_PARALLELISM) {}
 
 LoadingConfig::LoadingConfig(const Schema& schema,
                              const std::string& data_source,
@@ -775,9 +761,7 @@ LoadingConfig::LoadingConfig(const Schema& schema,
       scheme_(data_source),
       method_(method),
       format_(format),
-      parallelism_(loader_options::DEFAULT_PARALLELISM),
-      build_csr_in_mem_(loader_options::DEFAULT_BUILD_CSR_IN_MEM),
-      use_mmap_vector_(loader_options::DEFAULT_USE_MMAP_VECTOR) {
+      parallelism_(loader_options::DEFAULT_PARALLELISM) {
   metadata_[reader_options::DELIMITER] = delimiter;
 }
 

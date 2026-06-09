@@ -16,6 +16,7 @@
 # limitations under the License.
 #
 
+import json
 import logging
 import os
 import shutil
@@ -23,8 +24,6 @@ import sys
 import unittest
 
 import pytest
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "../"))
 
 from neug.database import Database
 
@@ -358,5 +357,206 @@ def test_alter_varchar_type():
     conn.execute("CREATE (:TestNode {id: 1, name: 'Alice'});")
     res = conn.execute("Match (n:TestNode) Return n.id, n.name;")
     assert list(res) == [[1, "Alice"]]
+    conn.close()
+    db.close()
+
+
+def test_get_varchar_default_value_1():
+    db_dir = "/tmp/test_get_varchar_default_value_1"
+    shutil.rmtree(db_dir, ignore_errors=True)
+    db = Database(db_dir, "w")
+    conn = db.connect()
+    conn.execute(
+        "CREATE NODE TABLE TestNode(id INT64 PRIMARY KEY, name VARCHAR(20) DEFAULT 'default_name');"
+    )
+    conn.execute("CREATE (:TestNode {id: 1});")
+    conn.execute("CREATE (:TestNode {id: 2});")
+    conn.execute("CREATE (:TestNode {id: 3});")
+    res = conn.execute("Match (n:TestNode) Return n.name;")
+    assert list(res) == [["default_name"], ["default_name"], ["default_name"]]
+    conn.close()
+    db.close()
+
+
+def test_get_varchar_default_value_2():
+    db_dir = "/tmp/test_get_varchar_default_value_2"
+    shutil.rmtree(db_dir, ignore_errors=True)
+    db = Database(db_dir, "w")
+    conn = db.connect()
+    conn.execute("CREATE NODE TABLE TestNode(id INT64 PRIMARY KEY);")
+    conn.execute("CREATE REL TABLE TestEdge(FROM TestNode TO TestNode);")
+    conn.execute("CREATE (:TestNode {id: 1});")
+    conn.execute("CREATE (:TestNode {id: 2});")
+    conn.execute("CREATE (:TestNode {id: 3});")
+    conn.execute(
+        "MATCH (a:TestNode {id: 1}), (b:TestNode {id: 2}) CREATE (a)-[:TestEdge]->(b);"
+    )
+    conn.execute(
+        "MATCH (a:TestNode {id: 2}), (b:TestNode {id: 3}) CREATE (a)-[:TestEdge]->(b);"
+    )
+    conn.execute("ALTER TABLE TestNode ADD name VARCHAR(20) DEFAULT 'default_name';")
+    conn.execute("CREATE (:TestNode {id: 4});")
+    conn.execute("CREATE (:TestNode {id: 5, name: 'custom_name'});")
+    res = conn.execute("Match (n:TestNode) Return n.name ORDER BY n.name;")
+    assert list(res) == [
+        ["custom_name"],
+        ["default_name"],
+        ["default_name"],
+        ["default_name"],
+        ["default_name"],
+    ]
+    conn.execute("ALTER TABLE TestEdge ADD date INT64;")
+    conn.execute(
+        "MATCH (a:TestNode {id: 1})-[e:TestEdge]->(b:TestNode {id: 2}) SET e.date = 1234567890;"
+    )
+    conn.execute(
+        "MATCH (a:TestNode {id: 1}), (b:TestNode { id: 3 }) CREATE (a)-[:TestEdge {date: 9876543210}]->(b);"
+    )
+    res = conn.execute(
+        "MATCH (a:TestNode {id: 1})-[e:TestEdge]->(b:TestNode) RETURN e.date;"
+    )
+    assert list(res) == [[1234567890], [9876543210]]
+    conn.close()
+    db.close()
+
+
+def test_drop_add_edge_table_column():
+    db_dir = "/tmp/test_drop_add_edge_table_column"
+    shutil.rmtree(db_dir, ignore_errors=True)
+    db = Database(db_dir, "w")
+    conn = db.connect()
+    # First create the graph schema
+    conn.execute(
+        """
+            CREATE NODE TABLE IF NOT EXISTS TestNode(
+                id INT64 PRIMARY KEY,
+                thread_id INT64
+            )
+        """
+    )
+    conn.execute(
+        """
+            CREATE REL TABLE IF NOT EXISTS TestEdge(
+                FROM TestNode TO TestNode
+            )
+        """
+    )
+    conn.close()
+    db.close()
+
+    db2 = Database(db_dir, "w")
+    conn2 = db2.connect()
+    conn2.execute("CREATE (v:TestNode {id: 1, thread_id: 1});")
+    conn2.execute("CREATE (v:TestNode {id: 2, thread_id: 2});")
+    conn2.execute("CREATE (v:TestNode {id: 3, thread_id: 3});")
+    conn2.execute(
+        "MATCH (v:TestNode {id: 1}), (v2:TestNode {id: 2}) CREATE (v)-[:TestEdge]->(v2);"
+    )
+    conn2.execute(
+        "MATCH (v:TestNode {id: 1}), (v2:TestNode {id: 3}) CREATE (v)-[:TestEdge]->(v2);"
+    )
+    conn2.execute("ALTER TABLE TestEdge ADD iteration INT64;")
+    conn2.execute(
+        "MATCH (v:TestNode {id: 1}), (v2:TestNode {id: 2}) CREATE (v)-[:TestEdge {iteration: 1}]->(v2);"
+    )
+    ret = conn2.execute(
+        "MATCH (v1:TestNode)-[e:TestEdge]->(v2:TestNode) RETURN e.iteration;"
+    )
+    assert list(ret) == [[0], [0], [1]]
+    conn2.execute("ALTER TABLE TestEdge DROP iteration;")
+    conn2.execute("ALTER TABLE TestEdge ADD iteration INT64;")
+    conn2.execute("ALTER TABLE TestEdge ADD iteration2 INT64;")
+    conn2.execute(
+        "MATCH (v:TestNode {id: 1}), (v2:TestNode {id: 2}) CREATE (v)-[:TestEdge {iteration: 2, iteration2: 3}]->(v2);"
+    )
+    ret = conn2.execute(
+        "MATCH (v1:TestNode)-[e:TestEdge]->(v2:TestNode) RETURN e.iteration, e.iteration2;"
+    )
+    assert list(ret) == [[0, 0], [0, 0], [0, 0], [2, 3]]
+    conn2.execute("ALTER TABLE TestEdge DROP iteration;")
+    conn2.execute("ALTER TABLE TestEdge DROP iteration2;")
+    # TODO(zhanglei): Turn on the test after issue #85 is fixed.
+    # conn2.execute("ALTER TABLE TestEdge ADD description STRING DEFAULT 'unknown';")
+    # conn2.execute(
+    #     "MATCH (v:TestNode {id: 1}), (v2:TestNode {id: 2}) CREATE (v)-[:TestEdge {description: 'test'}]->(v2);"
+    # )
+    # ret = conn2.execute(
+    #     "MATCH (v1:TestNode)-[e:TestEdge]->(v2:TestNode) RETURN e.description ORDER BY e.description; "
+    # )
+    # assert list(ret) == [["unknown"], ["unknown"], ["unknown"], ["unknown"], ["test"]]
+    conn2.close()
+    db2.close()
+
+
+def _get_edge_pair_relations_by_type_name(schema_text: str):
+    """Return map edge type_name -> list of vertex_type_pair relation dicts (JSON from get_schema)."""
+    data = json.loads(schema_text)
+    out = {}
+    for et in data.get("schema", {}).get("edge_types", []):
+        name = et.get("type_name")
+        if not name:
+            continue
+        out[name] = et.get("vertex_type_pair_relations", [])
+    return out
+
+
+def test_create_rel_table_edge_multiplicity(tmp_path):
+    """
+    `CREATE REL TABLE` with a multiplicity token (e.g. MANY_TO_ONE) is compiled to
+    a physical `CreateEdgeSchema` with a matching `multiplicity` value. The Python
+    API does not return raw physical plan text; the persisted graph schema from
+    `get_schema()` exposes the same information per triplet as the ``relation``
+    field (MANY_TO_ONE, ONE_TO_MANY, ONE_TO_ONE, MANY_TO_MANY).
+
+    Example: ``CREATE REL TABLE LivesIn(FROM User TO City, MANY_TO_ONE);`` — use
+    ``pytest -s`` to see the printed lines.
+    """
+    cases = [
+        # (edge_table, Cypher token) -> same labels as CreateEdgeSchema::Multiplicity
+        ("LivesIn", "MANY_TO_ONE", "MANY_TO_ONE"),
+        ("Serves", "ONE_TO_MANY", "ONE_TO_MANY"),
+        ("Tie", "ONE_TO_ONE", "ONE_TO_ONE"),
+        ("Social", "MANY_TO_MANY", "MANY_TO_MANY"),
+    ]
+    for rel_name, mul_token, expect_relation in cases:
+        db_dir = str(tmp_path / f"test_edge_mul_{rel_name}")
+        shutil.rmtree(db_dir, ignore_errors=True)
+
+        db = Database(db_dir, "w")
+        conn = db.connect()
+        conn.execute("CREATE NODE TABLE User(id INT64 PRIMARY KEY, name STRING);")
+        conn.execute("CREATE NODE TABLE City(id INT64 PRIMARY KEY, name STRING);")
+        conn.execute(f"CREATE REL TABLE {rel_name}(FROM User TO City, {mul_token});")
+        schema_text = conn.get_schema()
+        by_edge = _get_edge_pair_relations_by_type_name(schema_text)
+        pairs = by_edge.get(rel_name, [])
+        assert len(pairs) == 1, f"{rel_name}: {pairs!r}"
+        rel = pairs[0].get("relation")
+        assert (
+            rel == expect_relation
+        ), f"{rel_name} {mul_token}: got {rel!r}, want {expect_relation!r}"
+        print(
+            f"CREATE REL TABLE {rel_name}(..., {mul_token}) -> "
+            f"CreateEdgeSchema multiplicity: {rel}"
+        )
+        conn.close()
+        db.close()
+
+
+def test_create_rel_table_with_options(tmp_path):
+    """
+    `CREATE REL TABLE` may include a trailing ``WITH (k=v, ...)`` clause; only
+    checks that the DDL runs without error (no return-value assertions).
+    """
+    db_dir = str(tmp_path / "test_rel_table_options")
+    shutil.rmtree(db_dir, ignore_errors=True)
+    db = Database(db_dir, "w")
+    conn = db.connect()
+    conn.execute("CREATE NODE TABLE User(id INT64 PRIMARY KEY, name STRING);")
+    conn.execute("CREATE NODE TABLE City(id INT64 PRIMARY KEY, name STRING);")
+    conn.execute(
+        "CREATE REL TABLE LivesIn (FROM User TO City, creationDate INT64) WITH (sort_key_for_nbr='creationDate');"
+    )
+    # todo: check options in graph schema
     conn.close()
     db.close()

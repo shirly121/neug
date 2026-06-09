@@ -17,7 +17,6 @@
 #
 
 import glob
-import multiprocessing
 import os
 import re
 import shutil
@@ -33,6 +32,7 @@ from setuptools import find_packages  # noqa: H301
 from setuptools import setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py as _build_py
+from setuptools.command.install_lib import install_lib as _install_lib
 
 if sys.version_info >= (3, 12):
     from setuptools import Command  # noqa: F811
@@ -64,7 +64,7 @@ def get_version(file):
                         __version__ = line.split("Version: ", 1)[1].strip()
                         break
         if not __version__:
-            __version__ = "0.1.0"
+            __version__ = "0.1.2"
 
     return __version__
 
@@ -78,170 +78,160 @@ class CMakeExtension(Extension):
         self.sourcedir = os.fspath(Path(sourcedir).resolve())
 
 
+# BUILD_* options whose default differs between setup.py (wheel/CI use case)
+# and the root CMakeLists.txt. Keep these defaults stable — CI relies on them.
+_ENV_FLAGS = {
+    "BUILD_EXECUTABLES": "OFF",
+    "BUILD_HTTP_SERVER": "ON",
+    "BUILD_COMPILER": "ON",
+    "ENABLE_BACKTRACES": "OFF",
+    "WITH_MIMALLOC": "OFF",
+    "BUILD_TEST": "OFF",
+    "ENABLE_GCOV": "OFF",
+}
+
+
+def _on_off(name: str, default: str) -> str:
+    return "ON" if os.environ.get(name, default).upper() == "ON" else "OFF"
+
+
 class CMakeBuild(build_ext):
+    """Drive cmake against the root build tree, honoring env-var build options.
 
-    def initialize_options(self):
-        super().initialize_options()
-        # We set the build_temp to the local build/ directory
-        self.build_temp = Path.cwd() / "build"
+    Reruns `cmake configure + build` on every invocation so env-var changes
+    (BUILD_*, WITH_*, CMAKE_*) take effect every time. cmake's reconfigure is
+    nearly a no-op when nothing changed.
 
-    def run(self):
-        super().run()
+    Build dir defaults to `<repo>/build/`; override with NEUG_BUILD_DIR=...
+    For non-inplace builds (bdist_wheel), copies neug_py_bind*.so and
+    libneug.{dylib,so*} into extdir so the wheel ships them together.
+    """
 
-    def build_extension(self, ext: CMakeExtension) -> None:  # noqa: C901
-        # Must be in this form due to bug in .resolve() only fixed in Python 3.10+
-        ext_fullpath = Path.cwd() / self.get_ext_fullpath(ext.name)
-        extdir = ext_fullpath.parent.resolve()
+    def build_extension(self, ext: CMakeExtension) -> None:
+        build_dir = Path(
+            os.environ.get("NEUG_BUILD_DIR", Path(repo_root) / "build")
+        ).resolve()
+        py_so_dir = build_dir / "tools" / "python_bind"
+        core_lib_dir = build_dir / "src"
 
-        # Using this requires trailing slash for auto-detection & inclusion of
-        # auxiliary "native" libs
+        self._cmake_build_in_root(build_dir)
 
-        build_type = os.environ.get("BUILD_TYPE")
-        if build_type is None:
-            # Default to Release if not set
-            build_type = "Release"
-        build_type = build_type.upper()
+        if not list(py_so_dir.glob("neug_py_bind*.so")):
+            raise RuntimeError(f"neug_py_bind*.so not found in {py_so_dir} after build")
+
+        if self.inplace:
+            return
+
+        extdir = (Path.cwd() / self.get_ext_fullpath(ext.name)).parent.resolve()
+        extdir.mkdir(parents=True, exist_ok=True)
+        for src in [
+            *py_so_dir.glob("neug_py_bind*.so"),
+            *core_lib_dir.glob("libneug.dylib"),
+            *core_lib_dir.glob("libneug.so"),
+            *core_lib_dir.glob("libneug.so.*"),
+        ]:
+            shutil.copy2(src, extdir, follow_symlinks=True)
+            print(f"[CMakeBuild] copied {src.name} -> {extdir}")
+
+        # Mirror <repo>/build/extension/<name>/* into <extdir>/extension/<name>/
+        # so they get packaged into the wheel. Triggered by CI_INSTALL_EXTENSIONS
+        # (which the wheel-build CI sets); InstallLib's copy then becomes
+        # idempotent because the source dir already exists in build_lib.
+        ext_names = [
+            n.strip()
+            for n in os.environ.get("CI_INSTALL_EXTENSIONS", "").split(";")
+            if n.strip()
+        ]
+        ext_src_root = build_dir / "extension"
+        for name in ext_names:
+            src_dir = ext_src_root / name
+            if not src_dir.is_dir():
+                continue
+            dst_dir = extdir / "extension" / name
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            for f in src_dir.iterdir():
+                if f.is_file():
+                    shutil.copy2(f, dst_dir, follow_symlinks=True)
+            print(f"[CMakeBuild] copied extension/{name}/ -> {dst_dir}")
+
+    def _cmake_build_in_root(self, build_dir: Path) -> None:
+        build_dir.mkdir(parents=True, exist_ok=True)
+        cmake = shutil.which("cmake")
+        if cmake is None:
+            raise RuntimeError("CMake executable not found in PATH.")
+
+        cmake_args, build_args = self._collect_cmake_args()
+        print(f"[CMakeBuild] configuring at {build_dir} with {cmake_args}")
+        subprocess.run([cmake, repo_root, *cmake_args], cwd=build_dir, check=True)
+
+        # No --target: build everything cmake configured. When BUILD_EXECUTABLES
+        # or BUILD_TEST is ON this includes bulk_loader / simple_example /
+        # ctest binaries that CI exercises after `make build`.
+        print(f"[CMakeBuild] building with {build_args}")
+        subprocess.run([cmake, "--build", ".", *build_args], cwd=build_dir, check=True)
+
+    def _collect_cmake_args(self) -> tuple[list[str], list[str]]:
+        build_type = (os.environ.get("BUILD_TYPE") or "Release").upper()
         if build_type not in {"DEBUG", "RELEASE"}:
             raise ValueError(
-                f"Invalid BUILD_TYPE: {build_type}. Must be one of 'DEBUG' or 'RELEASE'."
+                f"Invalid BUILD_TYPE: {build_type}. Must be 'DEBUG' or 'RELEASE'."
             )
 
-        build_executables = (
-            "ON" if os.environ.get("BUILD_EXECUTABLES", "OFF") == "ON" else "OFF"
-        )
-        build_http_server = (
-            "ON" if os.environ.get("BUILD_HTTP_SERVER", "ON") == "ON" else "OFF"
-        )
-        build_compiler = (
-            "ON" if os.environ.get("BUILD_COMPILER", "ON") == "ON" else "OFF"
-        )
-        enable_backtraces = (
-            "ON" if os.environ.get("ENABLE_BACKTRACES", "OFF") == "ON" else "OFF"
-        )
-        with_mimalloc = (
-            "ON" if os.environ.get("WITH_MIMALLOC", "OFF") == "ON" else "OFF"
-        )
-        build_extensions = os.environ.get("BUILD_EXTENSIONS", "")
-        cmake_install_prefix = os.environ.get("CMAKE_INSTALL_PREFIX", None)
-        use_ninja = os.environ.get("USE_NINJA", "OFF") == "ON"
-        build_test = "OFF"
-        if os.environ.get("BUILD_TEST", "OFF") == "ON":
-            build_test = "ON"
-        enable_gcov = "OFF"
-        if os.environ.get("ENABLE_GCOV", "OFF") == "ON":
-            enable_gcov = "ON"
-        # cfg is now dynamically set based on the DEBUG environment variable
-
-        # CMake lets you override the generator - we need to check this.
-        # Can be set with Conda-Build, for example.
-        cmake_generator = os.environ.get("CMAKE_GENERATOR", "")
-
-        # Set Python_EXECUTABLE instead if you use PYBIND11_FINDPYTHON
-        # EXAMPLE_VERSION_INFO shows you how to pass a value into the C++ code
-        # from Python.
-        cmake_library_output_dir = f"{extdir}{os.sep}"
         cmake_args = [
-            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={cmake_library_output_dir}",
+            f"-DPython_EXECUTABLE={sys.executable}",
             f"-DPYTHON_EXECUTABLE={sys.executable}",
-            f"-DCMAKE_BUILD_TYPE={build_type}",  # not used on MSVC, but no harm
+            f"-DCMAKE_BUILD_TYPE={build_type}",
+            "-DBUILD_PYTHON=ON",
             "-DOPTIMIZE_FOR_HOST=OFF",
-            f"-DBUILD_EXECUTABLES={build_executables}",
-            f"-DBUILD_TEST={build_test}",
-            f"-DBUILD_COMPILER={build_compiler}",
-            f"-DENABLE_BACKTRACES={enable_backtraces}",
-            f"-DBUILD_HTTP_SERVER={build_http_server}",
-            f"-DWITH_MIMALLOC={with_mimalloc}",
-            f"-DENABLE_GCOV={enable_gcov}",
-            f"-DBUILD_EXTENSIONS={build_extensions}",
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+            *(
+                f"-D{name}={_on_off(name, default)}"
+                for name, default in _ENV_FLAGS.items()
+            ),
         ]
-        if build_extensions:
-            cmake_args.append(f"-DBUILD_EXTENSIONS={build_extensions}")
-        if cmake_install_prefix:
-            cmake_args += [
-                f"-DCMAKE_INSTALL_PREFIX={cmake_install_prefix}",
-            ]
-        if use_ninja:
-            cmake_args += ["-GNinja"]
-        build_args = []
-        # Adding CMake arguments set as environment variable
-        # (needed e.g. to build for ARM OSx on conda-forge)
-        if "CMAKE_ARGS" in os.environ:
-            cmake_args += [item for item in os.environ["CMAKE_ARGS"].split(" ") if item]
+
+        # BUILD_EXTENSIONS may come from BUILD_EXTENSIONS or CI_INSTALL_EXTENSIONS.
+        # CI sets the latter; both are valid and forwarded.
+        for env_name in ("BUILD_EXTENSIONS", "CI_INSTALL_EXTENSIONS"):
+            val = os.environ.get(env_name, "")
+            if val:
+                cmake_args.append(f"-DBUILD_EXTENSIONS={val}")
+
+        if prefix := os.environ.get("CMAKE_INSTALL_PREFIX"):
+            cmake_args.append(f"-DCMAKE_INSTALL_PREFIX={prefix}")
+        if extra := os.environ.get("CMAKE_ARGS", "").split():
+            cmake_args += extra
+
+        cmake_generator = os.environ.get("CMAKE_GENERATOR", "")
+        build_args: list[str] = []
 
         if self.compiler.compiler_type != "msvc":
-            # Using Ninja-build since it a) is available as a wheel and b)
-            # multithreads automatically. MSVC would require all variables be
-            # exported for Ninja to pick it up, which is a little tricky to do.
-            # Users can override the generator with CMAKE_GENERATOR in CMake
-            # 3.15+.
-            if not cmake_generator or cmake_generator == "Ninja":
+            use_ninja = _on_off("USE_NINJA", "OFF") == "ON"
+            if use_ninja or not cmake_generator or cmake_generator == "Ninja":
                 try:
                     import ninja
 
-                    ninja_executable_path = Path(ninja.BIN_DIR) / "ninja"
                     cmake_args += [
                         "-GNinja",
-                        f"-DCMAKE_MAKE_PROGRAM:FILEPATH={ninja_executable_path}",
+                        f"-DCMAKE_MAKE_PROGRAM:FILEPATH={Path(ninja.BIN_DIR) / 'ninja'}",
                     ]
                 except ImportError:
                     pass
-
         else:
-            # Single config generators are handled "normally"
             single_config = any(x in cmake_generator for x in {"NMake", "Ninja"})
-
-            # CMake allows an arch-in-generator style for backward compatibility
             contains_arch = any(x in cmake_generator for x in {"ARM", "Win64"})
-
-            # Specify the arch if using MSVC generator, but only if it doesn't
-            # contain a backward-compatibility arch spec already in the
-            # generator name.
             if not single_config and not contains_arch:
                 cmake_args += ["-A", PLAT_TO_CMAKE[self.plat_name]]
-
-            # Multi-config generators have a different way to specify configs
             if not single_config:
-                cmake_args += [
-                    f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{build_type.upper()}={extdir}"
-                ]
                 build_args += ["--config", build_type]
 
         if sys.platform.startswith("darwin"):
-            # Cross-compile support for macOS - respect ARCHFLAGS if set
             archs = re.findall(r"-arch (\S+)", os.environ.get("ARCHFLAGS", ""))
             if archs:
-                cmake_args += ["-DCMAKE_OSX_ARCHITECTURES={}".format(";".join(archs))]
+                cmake_args.append(f"-DCMAKE_OSX_ARCHITECTURES={';'.join(archs)}")
 
-        # Set CMAKE_BUILD_PARALLEL_LEVEL to control the parallel build level
-        # across all generators.
-        if "CMAKE_BUILD_PARALLEL_LEVEL" not in os.environ:
-            # self.parallel is a Python 3 only way to set parallel jobs by hand
-            # using -j in the build_ext call, not supported by pip or PyPA-build.
-            build_args += ["-j8"]
-        else:
-            # If the user has set CMAKE_BUILD_PARALLEL_LEVEL, we respect that.
-            build_args += [f"-j{os.environ['CMAKE_BUILD_PARALLEL_LEVEL']}"]
-
-        build_temp = Path(self.build_temp) / ext.name
-        if not build_temp.exists():
-            build_temp.mkdir(parents=True)
-
-        # find cmake executable
-        cmake_executable = shutil.which("cmake")
-        if cmake_executable is None:
-            raise RuntimeError("CMake executable not found in PATH.")
-
-        print(f"cmake command: {cmake_executable}, args: {cmake_args}")
-        subprocess.run(
-            [cmake_executable, ext.sourcedir, *cmake_args], cwd=build_temp, check=True
-        )
-        print(f"build args: {build_args}")
-        subprocess.run(
-            [cmake_executable, "--build", ".", *build_args],
-            cwd=build_temp,
-            check=True,
-        )
+        build_args.append(f"-j{os.environ.get('CMAKE_BUILD_PARALLEL_LEVEL', '8')}")
+        return cmake_args, build_args
 
 
 class BuildProto(Command):
@@ -320,11 +310,62 @@ class BuildProto(Command):
 
 
 class BuildExtFirst(_build_py):
-    # Override the build_py command to build the extension first.
+    """Run build_ext before build_py so the wheel sees the freshly-built .so."""
+
     def run(self):
-        # self.run_command("build_proto")
         self.run_command("build_ext")
         return super().run()
+
+
+class InstallLib(_install_lib):
+    """Ensure extension/* (e.g. extension/json/libjson.neug_extension) is copied.
+
+    CMake writes native extensions to build_lib/extension/<name>/.
+    Only runs when CI_INSTALL_EXTENSIONS is set (semicolon-separated, e.g. json;parquet).
+    Copies only the listed extensions so the wheel gets site-packages/extension/...
+    """
+
+    def run(self):
+        super().run()
+        # Only copy extensions when INSTALL_EXTENSIONS is set (e.g. json;parquet)
+        install_extensions = os.environ.get("CI_INSTALL_EXTENSIONS", "").strip()
+        print(
+            f"[InstallLib] INSTALL_EXTENSIONS={repr(install_extensions)} "
+            f"build_dir={self.build_dir!r} install_dir={self.install_dir!r}"
+        )
+        sys.stdout.flush()
+        if not install_extensions:
+            print("[InstallLib] Skip extension copy (INSTALL_EXTENSIONS empty)")
+            sys.stdout.flush()
+            return
+        names = [n.strip() for n in install_extensions.split(";") if n.strip()]
+        if not names:
+            print("[InstallLib] Skip extension copy (no names after split)")
+            sys.stdout.flush()
+            return
+        ext_src_base = os.path.join(self.build_dir, "extension")
+        ext_dst_base = os.path.join(self.install_dir, "extension")
+        print(
+            f"[InstallLib] ext_src_base={ext_src_base!r} exists={os.path.isdir(ext_src_base)}"
+        )
+        sys.stdout.flush()
+        if not os.path.isdir(ext_src_base):
+            print("[InstallLib] Skip (extension source dir missing)")
+            sys.stdout.flush()
+            return
+        for name in names:
+            src = os.path.join(ext_src_base, name)
+            if not os.path.isdir(src):
+                continue
+            dst = os.path.join(ext_dst_base, name)
+            os.makedirs(dst, exist_ok=True)
+            for f in os.listdir(src):
+                s = os.path.join(src, f)
+                d = os.path.join(dst, f)
+                if os.path.isfile(s):
+                    shutil.copy2(s, d)
+            print(f"[InstallLib] Copied extension: {name} -> {dst}")
+            sys.stdout.flush()
 
 
 setup(
@@ -338,7 +379,7 @@ setup(
     long_description=open(os.path.join(base_dir, "README.md"), "r").read(),
     long_description_content_type="text/markdown",
     packages=find_packages(exclude=["tests"]),
-    package_data={"neug": ["resources/*", "extension/*/*.neug_extension"]},
+    package_data={"neug": ["resources/*"]},
     zip_safe=False,
     include_package_data=True,
     entry_points={
@@ -351,6 +392,7 @@ setup(
         "protobuf==5.29.6",
         "requests",
         "click>=8.0.0",
+        "prompt_toolkit>=3.0.0",
         "tabulate>=0.9.0",
         "PyYAML>=6.0.2",
         "tqdm",
@@ -361,5 +403,6 @@ setup(
         "build_py": BuildExtFirst,
         "build_ext": CMakeBuild,
         "build_proto": BuildProto,
+        "install_lib": InstallLib,
     },
 )

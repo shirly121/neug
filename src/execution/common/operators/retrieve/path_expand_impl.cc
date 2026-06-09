@@ -22,7 +22,7 @@ namespace neug {
 namespace execution {
 
 std::pair<std::shared_ptr<IContextColumn>, std::vector<size_t>>
-iterative_expand_vertex_on_graph_view(const GenericView& view,
+iterative_expand_vertex_on_graph_view(const CsrView& view,
                                       const SLVertexColumn& input, int lower,
                                       int upper) {
   int input_label = input.label();
@@ -86,8 +86,8 @@ iterative_expand_vertex_on_graph_view(const GenericView& view,
 }
 
 std::pair<std::shared_ptr<IContextColumn>, std::vector<size_t>>
-iterative_expand_vertex_on_dual_graph_view(const GenericView& iview,
-                                           const GenericView& oview,
+iterative_expand_vertex_on_dual_graph_view(const CsrView& iview,
+                                           const CsrView& oview,
                                            const SLVertexColumn& input,
                                            int lower, int upper) {
   int input_label = input.label();
@@ -163,33 +163,28 @@ path_expand_vertex_without_predicate_impl(
     const StorageReadInterface& graph, const SLVertexColumn& input,
     const std::vector<LabelTriplet>& labels, Direction dir, int lower,
     int upper) {
-  if (labels.size() == 1) {
-    if (labels[0].src_label == labels[0].dst_label &&
-        labels[0].src_label == input.label()) {
-      if (dir == Direction::kBoth) {
-        auto iview = graph.GetGenericIncomingGraphView(
-            labels[0].src_label, labels[0].dst_label, labels[0].edge_label);
-        auto oview = graph.GetGenericOutgoingGraphView(
-            labels[0].src_label, labels[0].dst_label, labels[0].edge_label);
-        return iterative_expand_vertex_on_dual_graph_view(iview, oview, input,
-                                                          lower, upper);
-      } else if (dir == Direction::kIn) {
-        auto iview = graph.GetGenericIncomingGraphView(
-            labels[0].src_label, labels[0].dst_label, labels[0].edge_label);
-        return iterative_expand_vertex_on_graph_view(iview, input, lower,
-                                                     upper);
-      } else {
-        CHECK(dir == Direction::kOut);
-        auto oview = graph.GetGenericOutgoingGraphView(
-            labels[0].src_label, labels[0].dst_label, labels[0].edge_label);
-        return iterative_expand_vertex_on_graph_view(oview, input, lower,
-                                                     upper);
-      }
-    }
+  assert(labels.size() == 1);
+
+  assert(labels[0].src_label == labels[0].dst_label &&
+         labels[0].src_label == input.label());
+
+  if (dir == Direction::kBoth) {
+    auto iview = graph.GetGenericIncomingGraphView(
+        labels[0].src_label, labels[0].dst_label, labels[0].edge_label);
+    auto oview = graph.GetGenericOutgoingGraphView(
+        labels[0].src_label, labels[0].dst_label, labels[0].edge_label);
+    return iterative_expand_vertex_on_dual_graph_view(iview, oview, input,
+                                                      lower, upper);
+  } else if (dir == Direction::kIn) {
+    auto iview = graph.GetGenericIncomingGraphView(
+        labels[0].src_label, labels[0].dst_label, labels[0].edge_label);
+    return iterative_expand_vertex_on_graph_view(iview, input, lower, upper);
+  } else {
+    CHECK(dir == Direction::kOut);
+    auto oview = graph.GetGenericOutgoingGraphView(
+        labels[0].src_label, labels[0].dst_label, labels[0].edge_label);
+    return iterative_expand_vertex_on_graph_view(oview, input, lower, upper);
   }
-  LOG(FATAL) << "not implemented...";
-  std::shared_ptr<IContextColumn> ret(nullptr);
-  return std::make_pair(ret, std::vector<size_t>());
 }
 
 }  // namespace execution

@@ -6,7 +6,6 @@ add_subdirectory(serializer)
 add_subdirectory(task_system)
 add_subdirectory(types)
 add_subdirectory(vector)
-add_subdirectory(file_system)
 
 add_library(compiler_common
         OBJECT
@@ -25,7 +24,7 @@ add_library(compiler_common
         type_utils.cpp
         utils.cpp
         windows_utils.cpp)
-add_dependencies(compiler_common neug_plan_proto)
+add_dependencies(compiler_common neug_proto)
 
 set(ALL_OBJECT_FILES
         ${ALL_OBJECT_FILES} $<TARGET_OBJECTS:compiler_common>

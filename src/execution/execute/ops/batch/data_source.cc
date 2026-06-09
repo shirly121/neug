@@ -22,7 +22,7 @@
 
 #include "neug/compiler/common/assert.h"
 #include "neug/compiler/function/read_function.h"
-#include "neug/compiler/gopt/g_catalog_holder.h"
+#include "neug/compiler/main/metadata_registry.h"
 #include "neug/execution/common/context.h"
 #include "neug/execution/execute/ops/batch/data_source.h"
 #include "neug/utils/reader/reader.h"
@@ -70,9 +70,11 @@ std::shared_ptr<ReadSharedState> ReadStateBuilder::build(
   external_schema.entry = buildEntrySchema(data_source.entry_schema());
   external_schema.file = buildFileSchema(data_source.file_schema());
   read_shared_state->schema = external_schema;
-  auto& skip_columns = read_shared_state->skipColumns;
-  for (auto& skip_column : data_source.skip_columns()) {
-    skip_columns.push_back(skip_column);
+  // Proto field is named skip_columns for historical reasons; it now carries
+  // the list of columns to project (include), not skip.
+  auto& columns = read_shared_state->projectColumns;
+  for (const auto& col : data_source.project_columns()) {
+    columns.push_back(col);
   }
   if (data_source.has_skip_rows()) {
     read_shared_state->skipRows =
@@ -125,7 +127,7 @@ neug::result<OpBuildResultT> DataSourceOprBuilder::Build(
 
   // look up read function from catalog
   auto signatureName = sourcePB.extension_name();
-  auto gCatalog = catalog::GCatalogHolder::getGCatalog();
+  auto gCatalog = neug::main::MetadataRegistry::getCatalog();
   auto func = gCatalog->getFunctionWithSignature(signatureName);
   auto readFunc = func->ptrCast<function::ReadFunction>();
   return std::make_pair(std::make_unique<DataSourceOpr>(state, readFunc),

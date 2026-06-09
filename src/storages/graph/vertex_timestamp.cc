@@ -16,27 +16,27 @@
 #include "neug/storages/graph/vertex_timestamp.h"
 #include <filesystem>
 
+#include "neug/storages/checkpoint_manager.h"
+#include "neug/storages/module/module_factory.h"
 #include "neug/utils/serialization/in_archive.h"
 #include "neug/utils/serialization/out_archive.h"
 
 namespace neug {
 
-void VertexTimestamp::Open(const std::string& tracker_file_prefix) {
-  std::string ts_filename = tracker_file_prefix + ".ts";
-  std::string meta_filename = tracker_file_prefix + ".meta";
-  if (!meta_filename.empty() || std::filesystem::exists(meta_filename)) {
-    load_meta(meta_filename);
+void VertexTimestamp::Open(Checkpoint& ckp, const ModuleDescriptor& desc,
+                           MemoryLevel level) {
+  assert(desc.module_type.empty() || desc.module_type == ModuleTypeName());
+  auto path = desc.get_path(ModuleDescriptor::kDataPath);
+  if (path.has_value() && std::filesystem::exists(path.value())) {
+    load_ts(path.value());
   } else {
     Init(0, 4096);
   }
-  if (std::filesystem::exists(ts_filename)) {
-    load_ts(ts_filename);
-  }
 }
 
-void VertexTimestamp::Dump(const std::string& tracker_file_prefix) {
-  std::string ts_filename = tracker_file_prefix + ".ts";
-  std::string meta_filename = tracker_file_prefix + ".meta";
+ModuleDescriptor VertexTimestamp::Dump(Checkpoint& ckp) {
+  auto uuid = ckp.CreateRuntimeObject();
+  std::string ts_filename = ckp.runtime_dir() + "/" + uuid;
   // Before dump, reset the timestamp of modified vertices
   vid_t num = max_vertex_num_ - init_vertex_num_;
   for (vid_t v = 0; v < num; ++v) {
@@ -45,8 +45,12 @@ void VertexTimestamp::Dump(const std::string& tracker_file_prefix) {
     }
   }
   Compact();
-  dump_meta(meta_filename);
   dump_ts(ts_filename);
+  ModuleDescriptor descriptor;
+  descriptor.set_path(ModuleDescriptor::kDataPath,
+                      ckp.CommitRuntimeObject(uuid));
+  descriptor.module_type = ModuleTypeName();
+  return descriptor;
 }
 
 void VertexTimestamp::Init(vid_t init_vertex_num, vid_t max_vertex_num) {
@@ -179,21 +183,23 @@ void VertexTimestamp::ResetTimestamps() {
   }
 }
 
-void VertexTimestamp::load_meta(const std::string& meta_filename) {
-  if (!std::filesystem::exists(meta_filename)) {
+void VertexTimestamp::load_ts(const std::string& ts_filename) {
+  if (!std::filesystem::exists(ts_filename)) {
     Reset();
     return;
   }
 
-  FILE* file = fopen(meta_filename.c_str(), "r");
-  size_t file_size = std::filesystem::file_size(meta_filename);
+  FILE* file = fopen(ts_filename.c_str(), "r");
+  size_t file_size = std::filesystem::file_size(ts_filename);
   std::vector<char> buffer(file_size);
   auto ret = fread(buffer.data(), sizeof(char), file_size, file);
   if (ret != file_size) {
-    THROW_INTERNAL_EXCEPTION("Failed to read meta file: " + meta_filename);
+    THROW_INTERNAL_EXCEPTION("Failed to read ts file: " + ts_filename);
   }
   OutArchive arc;
   arc.SetSlice(buffer.data(), file_size);
+
+  // Read metadata
   arc >> init_vertex_num_ >> max_vertex_num_;
   Init(init_vertex_num_, max_vertex_num_);
   uint32_t removed_size;
@@ -208,40 +214,8 @@ void VertexTimestamp::load_meta(const std::string& meta_filename) {
       removed_vertices_->insert(v);
     }
   }
-  fclose(file);
-}
 
-void VertexTimestamp::dump_meta(const std::string& meta_filename) {
-  InArchive arc;
-  arc << init_vertex_num_ << max_vertex_num_;
-  if (removed_vertices_) {
-    arc << static_cast<uint32_t>(removed_vertices_->size());
-    for (const auto& v : *removed_vertices_) {
-      arc << v;
-    }
-  } else {
-    arc << static_cast<uint32_t>(0);
-  }
-  FILE* file = fopen(meta_filename.c_str(), "wb");
-  fwrite(arc.GetBuffer(), sizeof(char), arc.GetSize(), file);
-  fflush(file);
-  fclose(file);
-}
-
-void VertexTimestamp::load_ts(const std::string& ts_filename) {
-  if (!std::filesystem::exists(ts_filename)) {
-    return;
-  }
-
-  FILE* file = fopen(ts_filename.c_str(), "r");
-  size_t file_size = std::filesystem::file_size(ts_filename);
-  std::vector<char> buffer(file_size);
-  auto ret = fread(buffer.data(), sizeof(char), file_size, file);
-  if (ret != file_size) {
-    THROW_INTERNAL_EXCEPTION("Failed to read ts file: " + ts_filename);
-  }
-  OutArchive arc;
-  arc.SetSlice(buffer.data(), file_size);
+  // Read timestamp data
   uint32_t vec_size;
   arc >> vec_size;
   resize_inserted_vertices(vec_size);
@@ -260,6 +234,19 @@ void VertexTimestamp::load_ts(const std::string& ts_filename) {
 
 void VertexTimestamp::dump_ts(const std::string& ts_filename) {
   InArchive arc;
+
+  // Write metadata
+  arc << init_vertex_num_ << max_vertex_num_;
+  if (removed_vertices_) {
+    arc << static_cast<uint32_t>(removed_vertices_->size());
+    for (const auto& v : *removed_vertices_) {
+      arc << v;
+    }
+  } else {
+    arc << static_cast<uint32_t>(0);
+  }
+
+  // Write timestamp data
   vid_t vec_size = max_vertex_num_ - init_vertex_num_;
   arc << static_cast<uint32_t>(vec_size);
   for (vid_t i = 0; i < vec_size; ++i) {
@@ -302,4 +289,9 @@ void VertexTimestamp::resize_inserted_vertices(size_t new_size,
   }
   inserted_vertices_.swap(new_inserted_vertices);
 }
+
+void VertexTimestamp::Close() { Reset(); }
+
+NEUG_REGISTER_MODULE(VertexTimestamp);
+
 }  // namespace neug

@@ -28,13 +28,13 @@
 #include "neug/generated/proto/plan/cypher_dml.pb.h"
 #include "neug/generated/proto/plan/physical.pb.h"
 #include "neug/main/connection.h"
+#include "neug/storages/allocators.h"
+#include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/graph/property_graph.h"
 #include "neug/transaction/compact_transaction.h"
 #include "neug/transaction/insert_transaction.h"
 #include "neug/transaction/read_transaction.h"
 #include "neug/transaction/update_transaction.h"
-#include "neug/utils/allocators.h"
-#include "neug/utils/mmap_array.h"
 #include "neug/utils/property/types.h"
 #include "neug/version.h"
 
@@ -176,7 +176,7 @@ class NeugDB {
    * config.data_dir = "/path/to/graph";
    * config.thread_num = 8;
    * config.mode = neug::DBMode::READ_WRITE;
-   * config.memory_level = 2;  // Use hugepages
+   * config.memory_level = 1;  // Use memory-mapped virtual memory
    * config.enable_auto_compaction = true;
    *
    * neug::NeugDB db;
@@ -283,7 +283,7 @@ class NeugDB {
 
   inline const Schema& schema() const { return graph_.schema(); }
 
-  std::string work_dir() const { return work_dir_; }
+  std::string work_dir() const { return ws_.db_dir(); }
 
   inline const NeugDBConfig& config() const { return config_; }
 
@@ -297,10 +297,9 @@ class NeugDB {
 
  private:
   void preprocessConfig();
-  void initAllocators();
-  void openGraphAndSchema();
-  void ingestWals();
-  void ingestWals(IWalParser& parser, const std::string& work_dir);
+  void initAllocators(const std::string& allocator_dir);
+  void openGraphAndIngestWals();
+  void ingestWals(IWalParser& parser);
   void initPlannerAndQueryProcessor();
   /**
    * @brief Create a checkpoint of the current graph.
@@ -323,7 +322,7 @@ class NeugDB {
   bool is_pure_memory_;
   int thread_num_;
   NeugDBConfig config_;
-  std::string work_dir_;
+  CheckpointManager ws_;
   std::unique_ptr<FileLock> file_lock_;
 
   // The property graph and transaction controls

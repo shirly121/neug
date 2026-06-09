@@ -479,8 +479,6 @@ class NEUG_API Planner {
       std::unique_ptr<LogicalPlan> leftPlan,
       std::unique_ptr<LogicalPlan> rightPlan,
       const binder::expression_vector& joinNodeIDs);
-  std::vector<common::table_id_t> transformRelTableIds(
-      const binder::RelExpression& relExpr);
 
  private:
   std::shared_ptr<planner::LogicalOperator> extractExtend(
@@ -499,6 +497,8 @@ class NEUG_API Planner {
   std::unique_ptr<Schema> combineSchema(LogicalPlan& outerPlan);
 
   bool tryGetTableEntry(const std::string& labelName);
+
+  void resetExprUniqueNames(const binder::expression_vector& expressions);
 
  private:
   main::ClientContext* clientContext;

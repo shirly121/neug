@@ -78,9 +78,9 @@ class SDSLEdgeColumn : public IEdgeColumn {
 
   inline Direction dir() const override { return dir_; }
 
-  void generate_dedup_offset(std::vector<size_t>& offsets) const override {
-    // TODO(liulexiao): dedup with property value
-    ColumnsUtils::generate_dedup_offset(edges_, size(), offsets);
+  bool generate_dedup_offset(std::vector<size_t>& offsets) const override {
+    ColumnsUtils::generate_dedup_offset(edges_, offsets);
+    return true;
   }
 
   std::string column_info() const override {
@@ -185,8 +185,9 @@ class MSEdgeColumn : public IEdgeColumn {
 
   inline size_t size() const override { return total_size_; }
 
-  void generate_dedup_offset(std::vector<size_t>& offsets) const override {
-    LOG(FATAL) << "not implemented for " << this->column_info();
+  bool generate_dedup_offset(std::vector<size_t>& offsets) const override {
+    LOG(ERROR) << "not implemented for " << this->column_info();
+    return false;
   }
 
   std::string column_info() const override {
@@ -352,8 +353,9 @@ class BDSLEdgeColumn : public IEdgeColumn {
 
   inline size_t size() const override { return edges_.size(); }
 
-  void generate_dedup_offset(std::vector<size_t>& offsets) const override {
-    ColumnsUtils::generate_dedup_offset(edges_, size(), offsets);
+  bool generate_dedup_offset(std::vector<size_t>& offsets) const override {
+    ColumnsUtils::generate_dedup_offset(edges_, offsets);
+    return true;
   }
 
   std::string column_info() const override {
@@ -449,7 +451,9 @@ class SDMLEdgeColumn : public IEdgeColumn {
   inline EdgeRecord get_edge(size_t idx) const override {
     EdgeRecord ret;
     auto& e = edges_[idx];
-    ret.label = labels_[std::get<0>(e)];
+    int label_idx = std::get<0>(e);
+    assert(label_idx >= 0 && static_cast<size_t>(label_idx) < labels_.size());
+    ret.label = labels_[label_idx];
     ret.dir = dir_;
     ret.src = std::get<1>(e);
     ret.dst = std::get<2>(e);
@@ -459,8 +463,9 @@ class SDMLEdgeColumn : public IEdgeColumn {
 
   inline size_t size() const override { return edges_.size(); }
 
-  void generate_dedup_offset(std::vector<size_t>& offsets) const override {
-    ColumnsUtils::generate_dedup_offset(edges_, size(), offsets);
+  bool generate_dedup_offset(std::vector<size_t>& offsets) const override {
+    ColumnsUtils::generate_dedup_offset(edges_, offsets);
+    return true;
   }
 
   std::string column_info() const override {
@@ -497,6 +502,8 @@ class SDMLEdgeColumn : public IEdgeColumn {
     const auto& tup = edges_[idx];
     return std::get<1>(tup) != std::numeric_limits<vid_t>::max();
   }
+
+  bool is_optional() const override { return is_optional_; }
 
  private:
   friend class SDMLEdgeColumnBuilder;
@@ -570,7 +577,9 @@ class BDMLEdgeColumn : public IEdgeColumn {
   inline EdgeRecord get_edge(size_t idx) const override {
     EdgeRecord ret;
     auto& e = edges_[idx];
-    ret.label = labels_[std::get<0>(e)];
+    int label_idx = std::get<0>(e);
+    assert(label_idx >= 0 && static_cast<size_t>(label_idx) < labels_.size());
+    ret.label = labels_[label_idx];
     ret.dir = std::get<4>(e);
     ret.src = std::get<1>(e);
     ret.dst = std::get<2>(e);
@@ -580,8 +589,9 @@ class BDMLEdgeColumn : public IEdgeColumn {
 
   inline size_t size() const override { return edges_.size(); }
 
-  void generate_dedup_offset(std::vector<size_t>& offsets) const override {
-    ColumnsUtils::generate_dedup_offset(edges_, size(), offsets);
+  bool generate_dedup_offset(std::vector<size_t>& offsets) const override {
+    ColumnsUtils::generate_dedup_offset(edges_, offsets);
+    return true;
   }
 
   std::string column_info() const override {
@@ -616,6 +626,8 @@ class BDMLEdgeColumn : public IEdgeColumn {
     const auto& tup = edges_[idx];
     return std::get<1>(tup) != std::numeric_limits<vid_t>::max();
   }
+
+  bool is_optional() const override { return is_optional_; }
 
  private:
   friend class BDMLEdgeColumnBuilder;

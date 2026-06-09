@@ -275,6 +275,10 @@ GDDLConverter::convertToCreateEdgeGroupSchema(
   create_edge->set_conflict_action(
       static_cast<::physical::ConflictAction>(info->onConflict));
 
+  for (const auto& [k, v] : firstRelInfo->options) {
+    (*create_edge->mutable_options())[k] = v.toString();
+  }
+
   return physical_opr;
 }
 
@@ -319,6 +323,10 @@ GDDLConverter::convertToCreateEdgeSchema(
   // Set conflict action
   create_edge->set_conflict_action(
       static_cast<::physical::ConflictAction>(info->onConflict));
+
+  for (const auto& [k, v] : relInfo->options) {
+    (*create_edge->mutable_options())[k] = v.toString();
+  }
 
   return physical_opr;
 }
@@ -449,6 +457,8 @@ GDDLConverter::convertToAddEdgePropertySchema(const planner::LogicalAlter& op) {
   property->set_name(propertyDef.getName());
   auto irType = typeConverter.convertSimpleLogicalType(propertyDef.getType());
   *property->mutable_type() = std::move(*irType->mutable_data_type());
+  property->set_allocated_default_value(
+      exprConverter.convertDefaultValue(propertyDef).release());
 
   // Set conflict action
   add_property->set_conflict_action(

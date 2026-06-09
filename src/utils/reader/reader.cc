@@ -96,7 +96,7 @@ std::shared_ptr<arrow::dataset::Scanner> ArrowReader::createScanner(
     THROW_INVALID_ARGUMENT_EXCEPTION("Failed to build arrow options");
   }
 
-  if (!optionsBuilder->skipColumns(arrowOptions)) {
+  if (!optionsBuilder->projectColumns(arrowOptions)) {
     LOG(WARNING) << "Failed to set column projection, using all columns";
   }
 
@@ -115,6 +115,18 @@ std::shared_ptr<arrow::dataset::Scanner> ArrowReader::createScanner(
 
   arrow::Result<std::shared_ptr<arrow::dataset::Dataset>> dataset_result;
   if (scan_opts->dataset_schema) {
+    auto inspected = factory->Inspect();
+    if (inspected.ok()) {
+      auto fileSchema = inspected.ValueOrDie();
+      for (const auto& field : scan_opts->dataset_schema->fields()) {
+        if (!fileSchema->GetFieldByName(field->name())) {
+          THROW_SCHEMA_MISMATCH(
+              "Column '" + field->name() +
+              "' not found in file. Available columns: " +
+              fileSchema->ToString());
+        }
+      }
+    }
     dataset_result = factory->Finish(scan_opts->dataset_schema);
   } else {
     arrow::dataset::FinishOptions finish_options;
@@ -185,6 +197,17 @@ void ArrowReader::batch_read(std::shared_ptr<arrow::dataset::Scanner> scanner,
   if (!scanner) {
     THROW_INVALID_ARGUMENT_EXCEPTION("Scanner is null");
   }
+  auto row_num_result = scanner->CountRows();
+  int64_t row_num = 0;
+  if (!row_num_result.ok()) {
+    LOG(WARNING) << "Failed to count rows via scanner: "
+                 << row_num_result.status().message();
+    THROW_IO_EXCEPTION("Failed to count rows via scanner: " +
+                       row_num_result.status().message());
+  } else {
+    VLOG(10) << "Row count from scanner: " << row_num_result.ValueOrDie();
+    row_num = row_num_result.ValueOrDie();
+  }
 
   auto batch_reader_result = scanner->ToRecordBatchReader();
   if (!batch_reader_result.ok()) {
@@ -195,8 +218,8 @@ void ArrowReader::batch_read(std::shared_ptr<arrow::dataset::Scanner> scanner,
   }
   auto batch_reader = batch_reader_result.ValueOrDie();
 
-  auto batch_supplier =
-      std::make_shared<neug::ArrowRecordBatchStreamSupplier>(batch_reader);
+  auto batch_supplier = std::make_shared<neug::ArrowRecordBatchStreamSupplier>(
+      batch_reader, row_num);
 
   int num_cols = sharedState->columnNum();
   output.clear();

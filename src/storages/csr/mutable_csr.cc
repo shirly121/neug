@@ -15,18 +15,25 @@
 
 #include "neug/storages/csr/mutable_csr.h"
 
+#include "neug/storages/module/module_factory.h"
+
 #include <errno.h>
 #include <stdint.h>
+#include <unistd.h>
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <map>
 #include <memory>
-#include <stdexcept>
+#include <numeric>
 #include <thread>
 #include <utility>
+#include <vector>
 
-#include "neug/storages/file_names.h"
+#include "neug/storages/container/container_utils.h"
+#include "neug/storages/container/file_mmap_container.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/property/types.h"
@@ -35,195 +42,114 @@
 namespace neug {
 
 template <typename EDATA_T>
-void MutableCsr<EDATA_T>::open(const std::string& name,
-                               const std::string& snapshot_dir,
-                               const std::string& work_dir) {
-  mmap_array<int> degree_list;
-  mmap_array<int>* cap_list = &degree_list;
-  if (snapshot_dir != "") {
-    degree_list.open(snapshot_dir + "/" + name + ".deg", false);
-    if (std::filesystem::exists(snapshot_dir + "/" + name + ".cap")) {
-      cap_list = new mmap_array<int>();
-      cap_list->open(snapshot_dir + "/" + name + ".cap", false);
-    }
-    nbr_list_.open(snapshot_dir + "/" + name + ".nbr", false);
-    load_meta(snapshot_dir + "/" + name);
-  }
-  if (std::filesystem::exists(tmp_dir(work_dir) + "/" + name + ".nbr")) {
-    std::filesystem::remove(tmp_dir(work_dir) + "/" + name + ".nbr");
-  }
-  nbr_list_.touch(tmp_dir(work_dir) + "/" + name + ".nbr");
-  adj_list_buffer_.open(tmp_dir(work_dir) + "/" + name + ".adj_buffer", true);
-  adj_list_buffer_.resize(degree_list.size());
-  adj_list_size_.open(tmp_dir(work_dir) + "/" + name + ".adj_size", true);
-  adj_list_size_.resize(degree_list.size());
-  adj_list_capacity_.open(tmp_dir(work_dir) + "/" + name + ".adj_cap", true);
-  adj_list_capacity_.resize(degree_list.size());
-  locks_ = new SpinLock[degree_list.size()];
-
-  nbr_t* ptr = nbr_list_.data();
-  for (size_t i = 0; i < degree_list.size(); ++i) {
-    int degree = degree_list[i];
-    int cap = (*cap_list)[i];
-    adj_list_buffer_[i] = ptr;
-    adj_list_capacity_[i] = cap;
-    adj_list_size_[i] = degree;
-    ptr += cap;
-  }
-  if (cap_list != &degree_list) {
-    delete cap_list;
-  }
-}
-
-template <typename EDATA_T>
-void MutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
-  mmap_array<int> degree_list;
-  degree_list.open(prefix + ".deg", false);
-  load_meta(prefix);
-  mmap_array<int>* cap_list = &degree_list;
-  if (std::filesystem::exists(prefix + ".cap")) {
-    cap_list = new mmap_array<int>();
-    cap_list->open(prefix + ".cap", false);
+void MutableCsr<EDATA_T>::Open(Checkpoint& ckp,
+                               const ModuleDescriptor& descriptor,
+                               MemoryLevel memory_level) {
+  unsorted_since_ = std::stoull(descriptor.get("unsorted_since").value_or("0"));
+  edge_num_.store(std::stoull(descriptor.get("edge_num").value_or("0")));
+  degree_list_ = ckp.OpenFile(
+      descriptor.get_path(ModuleDescriptor::kDegreeListPath).value_or(""),
+      memory_level);
+  cap_list_ = ckp.OpenFile(
+      descriptor.get_path(ModuleDescriptor::kCapacityListPath).value_or(""),
+      memory_level);
+  nbr_list_ = ckp.OpenFile(
+      descriptor.get_path(ModuleDescriptor::kNbrListPath).value_or(""),
+      memory_level);
+  auto v_cap = degree_list_->GetDataSize() / sizeof(int);
+  adj_list_buffer_ =
+      ckp.CreateRuntimeContainer(v_cap * sizeof(nbr_t*), memory_level);
+  if (cap_list_->GetDataSize() != degree_list_->GetDataSize()) {
+    THROW_INTERNAL_EXCEPTION(
+        "Capacity list size does not match degree list size");
   }
 
-  nbr_list_.open(prefix + ".nbr", false);
-
-  adj_list_buffer_.reset();
-  adj_list_size_.reset();
-  adj_list_capacity_.reset();
-  auto v_cap = degree_list.size();
-  adj_list_buffer_.resize(v_cap);
-  adj_list_size_.resize(v_cap);
-  adj_list_capacity_.resize(v_cap);
-  locks_ = new SpinLock[v_cap];
-
-  nbr_t* ptr = nbr_list_.data();
-  for (size_t i = 0; i < degree_list.size(); ++i) {
-    int degree = degree_list[i];
-    int cap = (*cap_list)[i];
-    adj_list_buffer_[i] = ptr;
-    adj_list_capacity_[i] = cap;
-    adj_list_size_[i] = degree;
-    ptr += cap;
+  locks_ = std::make_unique<SpinLock[]>(v_cap);
+  const auto* deg_ptr = reinterpret_cast<const int*>(degree_list_->GetData());
+  const auto* cap_ptr = reinterpret_cast<const int*>(cap_list_->GetData());
+  auto* adj_lists_ptr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+  auto* nbr_list_ptr = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
+  uint64_t edge_count = 0;
+  for (size_t i = 0; i < v_cap; ++i) {
+    adj_lists_ptr[i] = nbr_list_ptr;
+    edge_count += deg_ptr[i];
+    nbr_list_ptr += cap_ptr[i];
   }
-
-  if (cap_list != &degree_list) {
-    delete cap_list;
+  if (edge_num_.load() != edge_count) {
+    LOG(WARNING) << "Edge count from meta (" << edge_num_.load()
+                 << ") does not match count computed from degree list ("
+                 << edge_count << "). Using computed count.";
+    THROW_STORAGE_EXCEPTION(
+        "Edge count mismatch: meta has " + std::to_string(edge_num_.load()) +
+        " but degree list implies " + std::to_string(edge_count) +
+        ", desc: " + descriptor.ToJsonString());
   }
 }
 
 template <typename EDATA_T>
-void MutableCsr<EDATA_T>::open_with_hugepages(const std::string& prefix) {
-  mmap_array<int> degree_list;
-  degree_list.open(prefix + ".deg", false);
-  load_meta(prefix);
-  mmap_array<int>* cap_list = &degree_list;
-  if (std::filesystem::exists(prefix + ".cap")) {
-    cap_list = new mmap_array<int>();
-    cap_list->open(prefix + ".cap", false);
+ModuleDescriptor MutableCsr<EDATA_T>::Dump(Checkpoint& ckp) {
+  ModuleDescriptor descriptor;
+  descriptor.module_type = ModuleTypeName();
+  descriptor.set("unsorted_since", std::to_string(unsorted_since_));
+  descriptor.set("edge_num", std::to_string(edge_num_.load()));
+
+  size_t vnum = vertex_capacity();
+
+  // Each internal buffer's path is stored as a named entry in the
+  // descriptor's typed paths_ map.
+  descriptor.set_path(ModuleDescriptor::kDegreeListPath,
+                      ckp.Commit(*degree_list_));
+
+  const nbr_t* const* adj_lists =
+      reinterpret_cast<const nbr_t* const*>(adj_list_buffer_->GetData());
+  const int* cap_arr = reinterpret_cast<const int*>(cap_list_->GetData());
+
+  std::string nbr_path_committed;
+  FileHeader header{};
+
+  auto runtime_uuid = ckp.CreateRuntimeObject();
+  auto nbr_path = ckp.runtime_dir() + "/" + runtime_uuid;
+  std::ofstream nbr_out(nbr_path, std::ios::binary);
+  if (!nbr_out.is_open()) {
+    THROW_IO_EXCEPTION("Failed to open file for writing: " + nbr_path);
   }
 
-  nbr_list_.open_with_hugepages(prefix + ".nbr");
+  nbr_out.write(reinterpret_cast<const char*>(&header), sizeof(header));
 
-  adj_list_buffer_.reset();
-  adj_list_size_.reset();
-  adj_list_capacity_.reset();
-  auto v_cap = degree_list.size();
-  adj_list_buffer_.open_with_hugepages("");
-  adj_list_buffer_.resize(v_cap);
-  adj_list_size_.open_with_hugepages("");
-  adj_list_size_.resize(v_cap);
-  adj_list_capacity_.open_with_hugepages("");
-  adj_list_capacity_.resize(v_cap);
-  locks_ = new SpinLock[v_cap];
-
-  nbr_t* ptr = nbr_list_.data();
-  for (size_t i = 0; i < degree_list.size(); ++i) {
-    int degree = degree_list[i];
-    int cap = (*cap_list)[i];
-    adj_list_buffer_[i] = ptr;
-    adj_list_capacity_[i] = cap;
-    adj_list_size_[i] = degree;
-    ptr += cap;
-  }
-
-  if (cap_list != &degree_list) {
-    delete cap_list;
-  }
-}
-
-template <typename EDATA_T>
-void MutableCsr<EDATA_T>::dump(const std::string& name,
-                               const std::string& new_snapshot_dir) {
-  size_t vnum = adj_list_buffer_.size();
-  dump_meta(new_snapshot_dir + "/" + name);
-  mmap_array<int> degree_list;
-  std::vector<int> cap_list;
-  degree_list.open("", false);
-  degree_list.resize(vnum);
-  cap_list.resize(vnum);
-  bool need_cap_list = false;
-  size_t offset = 0;
+  MD5_CTX ctx;
+  MD5_Init(&ctx);
   for (size_t i = 0; i < vnum; ++i) {
-    offset += adj_list_capacity_[i];
-
-    degree_list[i] = adj_list_size_[i];
-    cap_list[i] = adj_list_capacity_[i];
-    if (degree_list[i] != cap_list[i]) {
-      need_cap_list = true;
-    }
+    const char* data = reinterpret_cast<const char*>(adj_lists[i]);
+    size_t len = cap_arr[i] * sizeof(nbr_t);
+    nbr_out.write(data, len);
+    MD5_Update(&ctx, data, len);
   }
 
-  if (need_cap_list) {
-    write_file(new_snapshot_dir + "/" + name + ".cap", cap_list.data(),
-               sizeof(int), cap_list.size());
-  }
+  MD5_Final(header.data_md5, &ctx);
+  // Update the header with the correct MD5 after writing all data
+  nbr_out.seekp(0);
+  nbr_out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+  nbr_out.flush();
+  nbr_out.close();
+  nbr_path_committed = ckp.CommitRuntimeObject(runtime_uuid);
 
-  degree_list.dump(new_snapshot_dir + "/" + name + ".deg");
-
-  FILE* fout = fopen((new_snapshot_dir + "/" + name + ".nbr").c_str(), "wb");
-  std::string filename = new_snapshot_dir + "/" + name + ".nbr";
-  if (fout == nullptr) {
-    std::stringstream ss;
-    ss << "Failed to open nbr list " << filename << ", " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
-
-  for (size_t i = 0; i < vnum; ++i) {
-    size_t ret{};
-    if ((ret = fwrite(adj_list_buffer_[i], sizeof(nbr_t), adj_list_capacity_[i],
-                      fout)) != static_cast<size_t>(adj_list_capacity_[i])) {
-      std::stringstream ss;
-      ss << "Failed to write nbr list " << filename << ", expected "
-         << adj_list_capacity_[i] << ", got " << ret << ", " << strerror(errno);
-      LOG(ERROR) << ss.str();
-      throw std::runtime_error(ss.str());
-    }
-  }
-  int ret = 0;
-  if ((ret = fflush(fout)) != 0) {
-    std::stringstream ss;
-    ss << "Failed to flush nbr list " << filename << ", error code: " << ret
-       << " " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
-  if ((ret = fclose(fout)) != 0) {
-    std::stringstream ss;
-    ss << "Failed to close nbr list " << filename << ", error code: " << ret
-       << " " << strerror(errno);
-    LOG(ERROR) << ss.str();
-    throw std::runtime_error(ss.str());
-  }
+  descriptor.set_path(ModuleDescriptor::kNbrListPath, nbr_path_committed);
+  descriptor.set_path(ModuleDescriptor::kCapacityListPath,
+                      ckp.Commit(*cap_list_));
+  return descriptor;
 }
 
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::reset_timestamp() {
-  size_t vnum = adj_list_buffer_.size();
+  size_t vnum = vertex_capacity();
+  auto** buf_arr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+  auto* sz_arr = reinterpret_cast<int*>(degree_list_->GetData());
   for (size_t i = 0; i != vnum; ++i) {
-    nbr_t* nbrs = adj_list_buffer_[i];
-    size_t deg = adj_list_size_[i].load(std::memory_order_relaxed);
+    nbr_t* nbrs = buf_arr[i];
+    if (nbrs == nullptr) {
+      continue;
+    }
+    size_t deg = sz_arr[i];
     for (size_t j = 0; j != deg; ++j) {
       if (nbrs[j].timestamp != INVALID_TIMESTAMP) {
         nbrs[j].timestamp.store(0, std::memory_order_relaxed);
@@ -236,12 +162,18 @@ template <typename EDATA_T>
 void MutableCsr<EDATA_T>::compact() {
   // We don't shrink the capacity of each adjacency list, but just remove the
   // deleted edges.
-  size_t vnum = adj_list_buffer_.size();
+  size_t vnum = vertex_capacity();
+  auto** buf_arr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+  auto* sz_arr = reinterpret_cast<int*>(degree_list_->GetData());
+  size_t total_edge_num = 0;
   for (size_t i = 0; i != vnum; ++i) {
-    int sz = adj_list_size_[i];
-    nbr_t* read_ptr = adj_list_buffer_[i];
+    int sz = sz_arr[i];
+    nbr_t* read_ptr = buf_arr[i];
+    if (read_ptr == nullptr) {
+      continue;
+    }
     nbr_t* read_end = read_ptr + sz;
-    nbr_t* write_ptr = adj_list_buffer_[i];
+    nbr_t* write_ptr = buf_arr[i];
     int removed = 0;
     while (read_ptr != read_end) {
       if (read_ptr->timestamp != INVALID_TIMESTAMP) {
@@ -254,28 +186,45 @@ void MutableCsr<EDATA_T>::compact() {
       }
       ++read_ptr;
     }
-    adj_list_size_[i] -= removed;
+    sz_arr[i] -= removed;
+    total_edge_num += sz_arr[i];
+  }
+  if (total_edge_num != edge_num_.load()) {
+    LOG(WARNING) << "Inconsistent edge count after compaction"
+                 << ": expected " << edge_num_.load() << ", actual "
+                 << total_edge_num;
+    THROW_STORAGE_EXCEPTION(
+        "Inconsistent edge count after compaction: expected " +
+        std::to_string(edge_num_.load()) + ", actual " +
+        std::to_string(total_edge_num));
   }
 }
 
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::resize(vid_t vnum) {
-  if (vnum > adj_list_size_.size()) {
-    size_t old_size = adj_list_size_.size();
-    adj_list_buffer_.resize(vnum);
-    adj_list_size_.resize(vnum);
-    adj_list_capacity_.resize(vnum);
-    for (size_t k = old_size; k != vnum; ++k) {
-      adj_list_buffer_[k] = nullptr;
-      adj_list_size_[k] = 0;
-      adj_list_capacity_[k] = 0;
+  if (adj_list_buffer_ == nullptr || degree_list_ == nullptr ||
+      cap_list_ == nullptr) {
+    LOG(ERROR) << "Containers not initialized, cannot resize";
+    THROW_RUNTIME_ERROR("Containers not initialized");
+  }
+  auto old_vnum = vertex_capacity();
+  if (vnum > old_vnum) {
+    adj_list_buffer_->Resize(vnum * sizeof(nbr_t*));
+    degree_list_->Resize(vnum * sizeof(int));
+    cap_list_->Resize(vnum * sizeof(int));
+    auto** buf_arr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+    auto* sz_arr = reinterpret_cast<int*>(degree_list_->GetData());
+    auto* cap_arr = reinterpret_cast<int*>(cap_list_->GetData());
+    for (vid_t i = old_vnum; i < vnum; ++i) {
+      buf_arr[i] = nullptr;
+      sz_arr[i] = 0;
+      cap_arr[i] = 0;
     }
-    delete[] locks_;
-    locks_ = new SpinLock[vnum];
+    locks_ = std::make_unique<SpinLock[]>(vnum);
   } else {
-    adj_list_buffer_.resize(vnum);
-    adj_list_size_.resize(vnum);
-    adj_list_capacity_.resize(vnum);
+    adj_list_buffer_->Resize(vnum * sizeof(nbr_t*));
+    degree_list_->Resize(vnum * sizeof(int));
+    cap_list_->Resize(vnum * sizeof(int));
   }
 }
 
@@ -286,25 +235,30 @@ size_t MutableCsr<EDATA_T>::capacity() const {
 }
 
 template <typename EDATA_T>
-void MutableCsr<EDATA_T>::close() {
-  if (locks_ != nullptr) {
-    delete[] locks_;
-    locks_ = nullptr;
-  }
+void MutableCsr<EDATA_T>::Close() {
+  locks_.reset();
   adj_list_buffer_.reset();
-  adj_list_size_.reset();
-  adj_list_capacity_.reset();
+  degree_list_.reset();
+  cap_list_.reset();
   nbr_list_.reset();
 }
 
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::batch_sort_by_edge_data(timestamp_t ts) {
-  size_t vnum = adj_list_buffer_.size();
-  for (size_t i = 0; i != vnum; ++i) {
-    std::sort(
-        adj_list_buffer_[i],
-        adj_list_buffer_[i] + adj_list_size_[i].load(std::memory_order_relaxed),
-        [](const nbr_t& lhs, const nbr_t& rhs) { return lhs.data < rhs.data; });
+  if (adj_list_buffer_ != nullptr) {
+    size_t vnum = vertex_capacity();
+    auto** buf_arr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+    auto* sz_arr = reinterpret_cast<int*>(degree_list_->GetData());
+    for (size_t i = 0; i != vnum; ++i) {
+      nbr_t* begin = buf_arr[i];
+      if (begin == nullptr) {
+        continue;
+      }
+      std::sort(begin, begin + sz_arr[i],
+                [](const nbr_t& lhs, const nbr_t& rhs) {
+                  return lhs.data < rhs.data;
+                });
+    }
   }
   unsorted_since_ = ts;
 }
@@ -312,19 +266,31 @@ void MutableCsr<EDATA_T>::batch_sort_by_edge_data(timestamp_t ts) {
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::batch_delete_vertices(
     const std::set<vid_t>& src_set, const std::set<vid_t>& dst_set) {
-  vid_t vnum = adj_list_size_.size();
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
+  auto** buf_arr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+  auto* sz_arr = reinterpret_cast<int*>(degree_list_->GetData());
   for (vid_t src : src_set) {
     if (src < vnum) {
-      adj_list_size_[src] = 0;
+      auto* data = buf_arr[src];
+      auto* end = data + sz_arr[src];
+      for (auto* ptr = data; ptr != end; ++ptr) {
+        if (ptr->timestamp.load() != std::numeric_limits<timestamp_t>::max()) {
+          edge_num_.fetch_sub(1, std::memory_order_relaxed);
+        }
+      }
+      sz_arr[src] = 0;
     }
   }
   for (vid_t src = 0; src < vnum; ++src) {
-    if (adj_list_size_[src] == 0) {
+    if (sz_arr[src] == 0) {
       continue;
     }
-    const nbr_t* read_ptr = adj_list_buffer_[src];
-    const nbr_t* read_end = read_ptr + adj_list_size_[src].load();
-    nbr_t* write_ptr = adj_list_buffer_[src];
+    const nbr_t* read_ptr = buf_arr[src];
+    if (read_ptr == nullptr) {
+      continue;
+    }
+    const nbr_t* read_end = read_ptr + sz_arr[src];
+    nbr_t* write_ptr = buf_arr[src];
     int removed = 0;
     while (read_ptr != read_end) {
       vid_t nbr = read_ptr->neighbor;
@@ -334,19 +300,25 @@ void MutableCsr<EDATA_T>::batch_delete_vertices(
         }
         ++write_ptr;
       } else {
+        if (read_ptr->timestamp.load() !=
+            std::numeric_limits<timestamp_t>::max()) {
+          edge_num_.fetch_sub(1, std::memory_order_relaxed);
+        }
         ++removed;
       }
       ++read_ptr;
     }
-    adj_list_size_[src] -= removed;
+
+    sz_arr[src] -= removed;
   }
+  unsorted_since_ = 0;
 }
 
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::batch_delete_edges(
     const std::vector<vid_t>& src_list, const std::vector<vid_t>& dst_list) {
   std::map<vid_t, std::set<vid_t>> src_dst_map;
-  vid_t vnum = adj_list_size_.size();
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
   for (size_t i = 0; i < src_list.size(); ++i) {
     vid_t src = src_list[i];
     if (src >= vnum) {
@@ -354,51 +326,74 @@ void MutableCsr<EDATA_T>::batch_delete_edges(
     }
     src_dst_map[src].insert(dst_list[i]);
   }
+  auto** buf_arr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+  auto* sz_arr = reinterpret_cast<int*>(degree_list_->GetData());
   for (const auto& pair : src_dst_map) {
     vid_t src = pair.first;
-    nbr_t* write_ptr = adj_list_buffer_[src];
-    const nbr_t* read_end = write_ptr + adj_list_size_[src].load();
+    nbr_t* write_ptr = buf_arr[src];
+    if (write_ptr == nullptr) {
+      continue;
+    }
+    const nbr_t* read_end = write_ptr + sz_arr[src];
     while (write_ptr != read_end) {
       if (pair.second.find(write_ptr->neighbor) != pair.second.end()) {
         write_ptr->timestamp.store(std::numeric_limits<timestamp_t>::max());
+        edge_num_.fetch_sub(1, std::memory_order_relaxed);
       }
       ++write_ptr;
     }
   }
+  unsorted_since_ = 0;
 }
 
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::batch_delete_edges(
     const std::vector<std::pair<vid_t, int32_t>>& edges) {
   std::map<vid_t, std::set<int32_t>> src_offset_map;
-  vid_t vnum = adj_list_size_.size();
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
+  const auto* sz_arr = reinterpret_cast<const int*>(degree_list_->GetData());
+  auto** buf_arr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
   for (const auto& edge : edges) {
-    if (edge.first >= vnum || edge.second >= adj_list_size_[edge.first]) {
+    if (edge.first >= vnum || edge.second >= sz_arr[edge.first]) {
       continue;
     }
     src_offset_map[edge.first].insert(edge.second);
   }
   for (const auto& pair : src_offset_map) {
     vid_t src = pair.first;
-    nbr_t* write_ptr = adj_list_buffer_[src];
+    nbr_t* write_ptr = buf_arr[src];
+    if (write_ptr == nullptr) {
+      continue;
+    }
     for (auto offset : pair.second) {
+      if (write_ptr[offset].timestamp.load() !=
+          std::numeric_limits<timestamp_t>::max()) {
+        edge_num_.fetch_sub(1, std::memory_order_relaxed);
+      }
       write_ptr[offset].timestamp.store(
           std::numeric_limits<timestamp_t>::max());
     }
   }
+  unsorted_since_ = 0;
 }
 
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::delete_edge(vid_t src, int32_t offset,
                                       timestamp_t ts) {
-  vid_t vnum = adj_list_size_.size();
-  if (src >= vnum || offset >= adj_list_size_[src]) {
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
+  const auto* sz_arr = reinterpret_cast<const int*>(degree_list_->GetData());
+  if (src >= vnum || offset >= sz_arr[src]) {
     THROW_INVALID_ARGUMENT_EXCEPTION("src out of bound or offset out of bound");
   }
-  nbr_t* nbrs = adj_list_buffer_[src];
+  nbr_t* nbrs = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData())[src];
+  if (nbrs == nullptr) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("adjacency buffer is null");
+  }
   auto old_ts = nbrs[offset].timestamp.load();
   if (old_ts <= ts) {
     nbrs[offset].timestamp.store(std::numeric_limits<timestamp_t>::max());
+    edge_num_.fetch_sub(1, std::memory_order_relaxed);
+    unsorted_since_ = 0;
   } else if (old_ts == std::numeric_limits<timestamp_t>::max()) {
     LOG(ERROR) << "Attempting to delete already deleted edge.";
   } else {
@@ -410,11 +405,15 @@ void MutableCsr<EDATA_T>::delete_edge(vid_t src, int32_t offset,
 template <typename EDATA_T>
 void MutableCsr<EDATA_T>::revert_delete_edge(vid_t src, vid_t nbr,
                                              int32_t offset, timestamp_t ts) {
-  vid_t vnum = adj_list_size_.size();
-  if (src >= vnum || offset >= adj_list_size_[src]) {
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
+  const auto* sz_arr = reinterpret_cast<const int*>(degree_list_->GetData());
+  if (src >= vnum || offset >= sz_arr[src]) {
     THROW_INVALID_ARGUMENT_EXCEPTION("src out of bound or offset out of bound");
   }
-  nbr_t* nbrs = adj_list_buffer_[src];
+  nbr_t* nbrs = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData())[src];
+  if (nbrs == nullptr) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("adjacency buffer is null");
+  }
   if (nbrs[offset].neighbor != nbr) {
     THROW_INVALID_ARGUMENT_EXCEPTION("neighbor id not match");
   }
@@ -422,6 +421,7 @@ void MutableCsr<EDATA_T>::revert_delete_edge(vid_t src, vid_t nbr,
   if (old_ts == std::numeric_limits<timestamp_t>::max()) {
     assert(nbrs[offset].neighbor == nbr);
     nbrs[offset].timestamp.store(ts);
+    edge_num_.fetch_add(1, std::memory_order_relaxed);
   } else {
     THROW_INVALID_ARGUMENT_EXCEPTION(
         "Attempting to revert delete on edge that is not deleted.");
@@ -433,7 +433,10 @@ void MutableCsr<EDATA_T>::batch_put_edges(const std::vector<vid_t>& src_list,
                                           const std::vector<vid_t>& dst_list,
                                           const std::vector<EDATA_T>& data_list,
                                           timestamp_t ts) {
-  vid_t vnum = adj_list_size_.size();
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
+  if (vnum == 0) {
+    return;
+  }
   std::vector<int> degree(vnum, 0);
   for (auto src : src_list) {
     if (src < vnum) {
@@ -441,40 +444,46 @@ void MutableCsr<EDATA_T>::batch_put_edges(const std::vector<vid_t>& src_list,
     }
   }
 
+  auto** buf_arr = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+  auto* sz_arr = reinterpret_cast<int*>(degree_list_->GetData());
+  auto* cap_arr = reinterpret_cast<int*>(cap_list_->GetData());
   size_t total_to_move = 0;
   size_t total_to_allocate = 0;
   for (vid_t i = 0; i < vnum; ++i) {
-    int old_deg = adj_list_size_[i].load();
+    int old_deg = sz_arr[i];
     total_to_move += old_deg;
     int new_degree = degree[i] + old_deg;
     int new_cap = std::ceil(new_degree * NeugDBConfig::DEFAULT_RESERVE_RATIO);
-    adj_list_capacity_[i] = new_cap;
+    cap_arr[i] = new_cap;
     total_to_allocate += new_cap;
   }
 
   std::vector<nbr_t> new_nbr_list(total_to_move);
   size_t offset = 0;
   for (vid_t i = 0; i < vnum; ++i) {
-    int old_deg = adj_list_size_[i].load();
-    memcpy(new_nbr_list.data() + offset, adj_list_buffer_[i],
-           sizeof(nbr_t) * old_deg);
+    int old_deg = sz_arr[i];
+    if (old_deg > 0 && buf_arr[i] != nullptr) {
+      memcpy(new_nbr_list.data() + offset, buf_arr[i], sizeof(nbr_t) * old_deg);
+    }
     offset += old_deg;
   }
-
-  nbr_list_.resize(total_to_allocate);
+  nbr_list_->Resize(total_to_allocate * sizeof(nbr_t));
+  auto base_ptr = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
   offset = 0;
   size_t new_offset = 0;
   for (vid_t i = 0; i < vnum; ++i) {
-    nbr_t* new_buffer = nbr_list_.data() + offset;
-    int old_deg = adj_list_size_[i].load();
-    memcpy(new_buffer, new_nbr_list.data() + new_offset,
-           sizeof(nbr_t) * old_deg);
+    nbr_t* new_buffer = base_ptr != nullptr ? base_ptr + offset : nullptr;
+    int old_deg = sz_arr[i];
+    if (old_deg > 0 && new_buffer != nullptr) {
+      memcpy(new_buffer, new_nbr_list.data() + new_offset,
+             sizeof(nbr_t) * old_deg);
+    }
     new_offset += old_deg;
-    offset += adj_list_capacity_[i];
-    adj_list_buffer_[i] = new_buffer;
-    adj_list_size_[i].store(old_deg);
+    offset += cap_arr[i];
+    buf_arr[i] = new_buffer;
+    sz_arr[i] = old_deg;
   }
-
+  size_t added_edge_num = 0;
   for (size_t i = 0; i < src_list.size(); ++i) {
     vid_t src = src_list[i];
     if (src >= vnum) {
@@ -482,71 +491,49 @@ void MutableCsr<EDATA_T>::batch_put_edges(const std::vector<vid_t>& src_list,
     }
     vid_t dst = dst_list[i];
     const EDATA_T& data = data_list[i];
-    auto& nbr = adj_list_buffer_[src][adj_list_size_[src].fetch_add(1)];
+    auto& nbr = buf_arr[src][sz_arr[src]++];
     nbr.neighbor = dst;
     nbr.data = data;
     nbr.timestamp.store(ts);
+    added_edge_num++;
   }
-}
-
-template <typename EDATA_T>
-void MutableCsr<EDATA_T>::load_meta(const std::string& prefix) {
-  std::string meta_file_path = prefix + ".meta";
-  if (std::filesystem::exists(meta_file_path)) {
-    read_file(meta_file_path, &unsorted_since_, sizeof(timestamp_t), 1);
-
-  } else {
+  edge_num_.fetch_add(added_edge_num, std::memory_order_relaxed);
+  // invalidate sort flag
+  if (ts < unsorted_since_) {
     unsorted_since_ = 0;
   }
 }
 
 template <typename EDATA_T>
-void MutableCsr<EDATA_T>::dump_meta(const std::string& prefix) const {
-  std::string meta_file_path = prefix + ".meta";
-  write_file(meta_file_path, &unsorted_since_, sizeof(timestamp_t), 1);
+void SingleMutableCsr<EDATA_T>::Open(Checkpoint& ckp,
+                                     const ModuleDescriptor& descriptor,
+                                     MemoryLevel level) {
+  assert(descriptor.module_type.empty() ||
+         descriptor.module_type == ModuleTypeName());
+  nbr_list_ = ckp.OpenFile(
+      descriptor.get_path(ModuleDescriptor::kNbrListPath).value_or(""), level);
+  edge_num_.store(std::stoull(descriptor.get("edge_num").value_or("0")));
 }
 
 template <typename EDATA_T>
-void SingleMutableCsr<EDATA_T>::open(const std::string& name,
-                                     const std::string& snapshot_dir,
-                                     const std::string& work_dir) {
-  auto tmp_file = tmp_dir(work_dir) + "/" + name + ".snbr";
-  auto snapshot_file = snapshot_dir + "/" + name + ".snbr";
-  if (std::filesystem::exists(tmp_file)) {
-    std::filesystem::remove(tmp_file);
-  }
-  if (!std::filesystem::exists(tmp_file)) {
-    if (std::filesystem::exists(snapshot_file)) {
-      copy_file(snapshot_file, tmp_file);
-    }
-  }
-  nbr_list_.open(tmp_file, true);
-}
-
-template <typename EDATA_T>
-void SingleMutableCsr<EDATA_T>::open_in_memory(const std::string& prefix) {
-  nbr_list_.open(prefix + ".snbr", false);
-}
-
-template <typename EDATA_T>
-void SingleMutableCsr<EDATA_T>::open_with_hugepages(const std::string& prefix) {
-  nbr_list_.open_with_hugepages(prefix + ".snbr");
-}
-
-template <typename EDATA_T>
-void SingleMutableCsr<EDATA_T>::dump(const std::string& name,
-                                     const std::string& new_snapshot_dir) {
-  // TODO: opt with mv
-  write_file(new_snapshot_dir + "/" + name + ".snbr", nbr_list_.data(),
-             sizeof(nbr_t), nbr_list_.size());
+ModuleDescriptor SingleMutableCsr<EDATA_T>::Dump(Checkpoint& ckp) {
+  ModuleDescriptor descriptor;
+  descriptor.module_type = ModuleTypeName();
+  descriptor.set_path(ModuleDescriptor::kNbrListPath, ckp.Commit(*nbr_list_));
+  descriptor.set("edge_num", std::to_string(edge_num_.load()));
+  return descriptor;
 }
 
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::reset_timestamp() {
-  size_t vnum = nbr_list_.size();
+  if (!nbr_list_) {
+    return;
+  }
+  nbr_t* data = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
+  size_t vnum = vertex_capacity();
   for (size_t i = 0; i != vnum; ++i) {
-    if (nbr_list_[i].timestamp != INVALID_TIMESTAMP) {
-      nbr_list_[i].timestamp.store(0, std::memory_order_relaxed);
+    if (data[i].timestamp != INVALID_TIMESTAMP) {
+      data[i].timestamp.store(0, std::memory_order_relaxed);
     }
   }
 }
@@ -556,24 +543,23 @@ void SingleMutableCsr<EDATA_T>::compact() {}
 
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::resize(vid_t vnum) {
-  if (vnum > nbr_list_.size()) {
-    size_t old_size = nbr_list_.size();
-    nbr_list_.resize(vnum);
-    for (size_t k = old_size; k != vnum; ++k) {
-      nbr_list_[k].timestamp.store(std::numeric_limits<timestamp_t>::max());
+  size_t old_vnum = vertex_capacity();
+  nbr_list_->Resize(vnum * sizeof(nbr_t));
+  if (vnum > old_vnum) {
+    auto* data = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
+    for (vid_t i = old_vnum; i < vnum; ++i) {
+      data[i].timestamp.store(std::numeric_limits<timestamp_t>::max());
     }
-  } else {
-    nbr_list_.resize(vnum);
   }
 }
 
 template <typename EDATA_T>
 size_t SingleMutableCsr<EDATA_T>::capacity() const {
-  return nbr_list_.size();
+  return vertex_capacity();
 }
 
 template <typename EDATA_T>
-void SingleMutableCsr<EDATA_T>::close() {
+void SingleMutableCsr<EDATA_T>::Close() {
   nbr_list_.reset();
 }
 
@@ -583,15 +569,26 @@ void SingleMutableCsr<EDATA_T>::batch_sort_by_edge_data(timestamp_t ts) {}
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::batch_delete_vertices(
     const std::set<vid_t>& src_set, const std::set<vid_t>& dst_set) {
-  vid_t vnum = nbr_list_.size();
+  if (!nbr_list_) {
+    return;
+  }
+  nbr_t* data = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
   for (auto src : src_set) {
     if (src < vnum) {
-      nbr_list_[src].timestamp.store(std::numeric_limits<timestamp_t>::max());
+      if (data[src].timestamp.load() !=
+          std::numeric_limits<timestamp_t>::max()) {
+        edge_num_.fetch_sub(1, std::memory_order_relaxed);
+      }
+      data[src].timestamp.store(std::numeric_limits<timestamp_t>::max());
     }
   }
   for (vid_t v = 0; v < vnum; ++v) {
-    auto& nbr = nbr_list_[v];
+    auto& nbr = data[v];
     if (dst_set.find(nbr.neighbor) != dst_set.end()) {
+      if (nbr.timestamp.load() != std::numeric_limits<timestamp_t>::max()) {
+        edge_num_.fetch_sub(1, std::memory_order_relaxed);
+      }
       nbr.timestamp.store(std::numeric_limits<timestamp_t>::max());
     }
   }
@@ -600,15 +597,22 @@ void SingleMutableCsr<EDATA_T>::batch_delete_vertices(
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::batch_delete_edges(
     const std::vector<vid_t>& src_list, const std::vector<vid_t>& dst_list) {
-  vid_t vnum = nbr_list_.size();
+  if (!nbr_list_) {
+    return;
+  }
+  nbr_t* data = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
   for (size_t i = 0; i != src_list.size(); ++i) {
     vid_t src = src_list[i];
     vid_t dst = dst_list[i];
     if (src >= vnum) {
       continue;
     }
-    auto& nbr = nbr_list_[src];
+    auto& nbr = data[src];
     if (nbr.neighbor == dst) {
+      if (nbr.timestamp.load() != std::numeric_limits<timestamp_t>::max()) {
+        edge_num_.fetch_sub(1, std::memory_order_relaxed);
+      }
       nbr.timestamp.store(std::numeric_limits<timestamp_t>::max());
     }
   }
@@ -617,31 +621,41 @@ void SingleMutableCsr<EDATA_T>::batch_delete_edges(
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::batch_delete_edges(
     const std::vector<std::pair<vid_t, int32_t>>& edge_list) {
-  vid_t vnum = nbr_list_.size();
+  if (!nbr_list_) {
+    return;
+  }
+  nbr_t* data = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
   for (const auto& edge : edge_list) {
     vid_t src = edge.first;
     if (src >= vnum) {
       continue;
     }
-    auto& nbr = nbr_list_[src];
+    auto& nbr = data[src];
     assert(edge.second == 0);
     nbr.timestamp.store(std::numeric_limits<timestamp_t>::max());
+    edge_num_.fetch_sub(1, std::memory_order_relaxed);
   }
 }
 
 template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::delete_edge(vid_t src, int32_t offset,
                                             timestamp_t ts) {
-  vid_t vnum = nbr_list_.size();
+  if (!nbr_list_) {
+    return;
+  }
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
   if (src >= vnum) {
     THROW_INVALID_ARGUMENT_EXCEPTION(
         "src out of bound: " + std::to_string(src) +
         " >= " + std::to_string(vnum));
   }
-  auto& nbr = nbr_list_[src];
+  nbr_t* data = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
+  auto& nbr = data[src];
   assert(offset == 0);
   if (nbr.timestamp.load() <= ts) {
     nbr.timestamp.store(std::numeric_limits<timestamp_t>::max());
+    edge_num_.fetch_sub(1, std::memory_order_relaxed);
   } else if (nbr.timestamp.load() == std::numeric_limits<timestamp_t>::max()) {
     LOG(ERROR) << "Fail to delete edge, already deleted.";
   } else {
@@ -653,16 +667,21 @@ template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::revert_delete_edge(vid_t src, vid_t nbr_vid,
                                                    int32_t offset,
                                                    timestamp_t ts) {
-  vid_t vnum = nbr_list_.size();
+  if (!nbr_list_) {
+    return;
+  }
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
   if (src >= vnum || offset != 0) {
     THROW_INVALID_ARGUMENT_EXCEPTION("src out of bound or offset out of bound");
   }
-  auto& nbr = nbr_list_[src];
+  nbr_t* data = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
+  auto& nbr = data[src];
   if (nbr.neighbor != nbr_vid) {
     THROW_INVALID_ARGUMENT_EXCEPTION("neighbor id not match");
   }
   if (nbr.timestamp.load() == std::numeric_limits<timestamp_t>::max()) {
     nbr.timestamp.store(ts);
+    edge_num_.fetch_add(1, std::memory_order_relaxed);
   } else {
     THROW_INVALID_ARGUMENT_EXCEPTION(
         "Attempting to revert delete on edge that is not deleted.");
@@ -673,16 +692,21 @@ template <typename EDATA_T>
 void SingleMutableCsr<EDATA_T>::batch_put_edges(
     const std::vector<vid_t>& src_list, const std::vector<vid_t>& dst_list,
     const std::vector<EDATA_T>& data_list, timestamp_t ts) {
-  vid_t vnum = nbr_list_.size();
+  if (!nbr_list_) {
+    return;
+  }
+  vid_t vnum = static_cast<vid_t>(vertex_capacity());
+  nbr_t* data = reinterpret_cast<nbr_t*>(nbr_list_->GetData());
   for (size_t i = 0; i != src_list.size(); ++i) {
     vid_t src = src_list[i];
     if (src >= vnum) {
       continue;
     }
-    auto& nbr = nbr_list_[src];
+    auto& nbr = data[src];
     nbr.neighbor = dst_list[i];
     nbr.data = data_list[i];
     nbr.timestamp.store(ts);
+    edge_num_.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
@@ -709,5 +733,41 @@ template class SingleMutableCsr<EmptyType>;
 template class SingleMutableCsr<DateTime>;
 template class SingleMutableCsr<Interval>;
 template class SingleMutableCsr<bool>;
+
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, EmptyType);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, bool);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, int32_t);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, uint32_t);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, int64_t);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, uint64_t);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, float);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, double);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, Date);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, DateTime);
+NEUG_REGISTER_TEMPLATE_MODULE(MutableCsr, Interval);
+
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, EmptyType);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, bool);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, int32_t);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, uint32_t);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, int64_t);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, uint64_t);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, float);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, double);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, Date);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, DateTime);
+NEUG_REGISTER_TEMPLATE_MODULE(SingleMutableCsr, Interval);
+
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, EmptyType);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, bool);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, int32_t);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, uint32_t);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, int64_t);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, uint64_t);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, float);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, double);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, Date);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, DateTime);
+NEUG_REGISTER_TEMPLATE_MODULE(EmptyCsr, Interval);
 
 }  // namespace neug

@@ -20,12 +20,10 @@ add_library(
         bind_transaction.cpp
         bind_updating_clause.cpp
         bind_extension.cpp
-        bind_export_database.cpp
-        bind_import_database.cpp
         bind_use_database.cpp
         bind_standalone_call_function.cpp
         bind_table_function.cpp)
-add_dependencies(neug_binder_bind neug_plan_proto)
+add_dependencies(neug_binder_bind neug_proto)
 
 set(ALL_OBJECT_FILES
         ${ALL_OBJECT_FILES} $<TARGET_OBJECTS:neug_binder_bind>

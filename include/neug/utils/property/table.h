@@ -21,8 +21,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "neug/config.h"
+#include "neug/execution/common/types/value.h"
+#include "neug/storages/checkpoint_manager.h"
 #include "neug/utils/property/column.h"
-#include "neug/utils/property/property.h"
 #include "neug/utils/property/types.h"
 
 namespace neug {
@@ -30,46 +32,23 @@ namespace neug {
 class Table {
  public:
   Table();
+
+  Table(const std::vector<std::string>& col_names,
+        const std::vector<DataType>& property_types);
+
   ~Table();
 
-  void init(const std::string& name, const std::string& work_dir,
-            const std::vector<std::string>& col_name,
-            const std::vector<DataType>& types,
-            const std::vector<Property>& default_property_values,
-            const std::vector<StorageStrategy>& strategies_);
+  void Init(Checkpoint& ckp, MemoryLevel level);
 
-  void open(const std::string& name, const std::string& work_dir,
-            const std::vector<std::string>& col_name,
-            const std::vector<DataType>& property_types,
-            const std::vector<Property>& default_property_values,
-            const std::vector<StorageStrategy>& strategies_);
-
-  void open_in_memory(const std::string& name, const std::string& work_dir,
-                      const std::vector<std::string>& col_name,
-                      const std::vector<DataType>& property_types,
-                      const std::vector<Property>& default_property_values,
-                      const std::vector<StorageStrategy>& strategies_);
-
-  void open_with_hugepages(const std::string& name, const std::string& work_dir,
-                           const std::vector<std::string>& col_name,
-                           const std::vector<DataType>& property_types,
-                           const std::vector<Property>& default_property_values,
-                           const std::vector<StorageStrategy>& strategies_,
-                           bool force = false);
-
-  void copy_to_tmp(const std::string& name, const std::string& snapshot_dir,
-                   const std::string& work_dir);
-
-  void dump(const std::string& name, const std::string& snapshot_dir);
+  void SetColumn(int idx, std::shared_ptr<ColumnBase> col);
 
   void reset_header(const std::vector<std::string>& col_name);
 
-  void add_columns(const std::vector<std::string>& col_names,
+  void add_columns(Checkpoint& ckp, const std::vector<std::string>& col_names,
                    const std::vector<DataType>& col_types,
-                   const std::vector<Property>& default_property_values,
-                   size_t column_size,
-                   const std::vector<StorageStrategy>& strategies_ = {},
-                   int memory_level = 0);
+                   const std::vector<execution::Value>& default_property_values,
+                   size_t capacity,
+                   MemoryLevel memory_level = MemoryLevel::kInMemory);
 
   const std::vector<std::string>& column_names() const;
 
@@ -83,7 +62,7 @@ class Table {
 
   const std::shared_ptr<ColumnBase> get_column(const std::string& name) const;
 
-  std::vector<Property> get_row(size_t row_id) const;
+  std::vector<execution::Value> get_row(size_t row_id) const;
 
   std::shared_ptr<ColumnBase> get_column_by_id(size_t index);
 
@@ -102,48 +81,28 @@ class Table {
     }
   }
   std::vector<std::shared_ptr<ColumnBase>>& columns();
-  std::vector<ColumnBase*>& column_ptrs();
 
-  void insert(size_t index, const std::vector<Property>& values,
-              bool insert_safe = false);
+  void insert(size_t index, const std::vector<execution::Value>& values,
+              bool insert_safe);
 
   void resize(size_t row_num);
-
-  inline Property at(size_t row_id, size_t col_id) const {
-    return column_ptrs_[col_id]->get_prop(row_id);
-  }
+  /**
+   * @brief Resize the table to row_num, and fill the new rows with default
+   * values. Assume it is safe to insert the default value even if it is
+   * reserving, since user could always override.
+   */
+  void resize(size_t row_num,
+              const std::vector<execution::Value>& default_values);
 
   void ingest(uint32_t index, OutArchive& arc);
 
   void close();
 
-  void drop();
-
-  void ensure_writable(size_t col_id);
-
-  void set_name(const std::string& name);
-
-  void set_work_dir(const std::string& work_dir);
-
  private:
-  void mark_column_deleted(const std::string& col_name);
-  void buildColumnPtrs();
-  void initColumns(const std::vector<std::string>& col_name,
-                   const std::vector<DataType>& types,
-                   const std::vector<Property>& default_property_values,
-                   const std::vector<StorageStrategy>& strategies_);
-
   std::unordered_map<std::string, int> col_id_map_;
   std::vector<std::string> col_names_;
-  std::vector<Property> col_default_values_;
 
   std::vector<std::shared_ptr<ColumnBase>> columns_;
-  std::vector<ColumnBase*> column_ptrs_;
-  std::vector<bool> col_deleted_;
-
-  bool touched_;
-  std::string name_;
-  std::string work_dir_, snapshot_dir_;
 };
 
 }  // namespace neug

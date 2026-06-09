@@ -2,8 +2,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include "column_assertions.h"
-#include "neug/compiler/common/file_system/virtual_file_system.h"
-#include "neug/compiler/gopt/g_vfs_holder.h"
 #include "neug/main/neug_db.h"
 
 class TestJsonExtension : public ::testing::Test {
@@ -16,8 +14,6 @@ class TestJsonExtension : public ::testing::Test {
   std::string vperson_jsonl;
 
   void SetUp() override {
-    auto vfs_ = std::make_unique<neug::common::VirtualFileSystem>();
-    neug::common::VFSHolder::setVFS(vfs_.get());
     const char* dir = std::getenv("FLEX_DATA_DIR");
     ASSERT_NE(dir, nullptr) << "FLEX_DATA_DIR environment variable is not set";
     ASSERT_NE(dir[0], '\0') << "FLEX_DATA_DIR environment variable is empty";
@@ -68,10 +64,6 @@ TEST_F(TestJsonExtension, VPersonJson) {
   auto conn = db.Connect();
   ASSERT_TRUE(conn != nullptr);
 
-  auto load_res = conn->Query("LOAD json");
-  ASSERT_TRUE(load_res.has_value())
-      << "LOAD json failed: " << load_res.error().ToString();
-
   std::string import_query =
       "COPY person FROM (LOAD FROM \"" + vperson_json +
       "\" RETURN ID, fName, gender, age, eyesight, height);";
@@ -119,12 +111,8 @@ TEST_F(TestJsonExtension, VPersonJsonl) {
   auto conn = db.Connect();
   ASSERT_TRUE(conn != nullptr);
 
-  auto load_res = conn->Query("LOAD json");
-  ASSERT_TRUE(load_res.has_value())
-      << "LOAD json failed: " << load_res.error().ToString();
-
   std::string import_query = "COPY person FROM (LOAD FROM \"" + vperson_jsonl +
-                             "\" (newline_delimited=true) RETURN ID, fName, "
+                             "\" RETURN ID, fName, "
                              "gender, age, eyesight, height);";
   auto import_res = conn->Query(import_query);
   ASSERT_TRUE(import_res.has_value())

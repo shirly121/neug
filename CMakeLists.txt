@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/NEUG_VERSION NEUG_VERSION)
 # Strip trailing newline
@@ -33,7 +33,6 @@ project (
 
 option(BUILD_TEST "Whether to build test" OFF)
 option(BUILD_DOC "Whether to build doc" OFF)
-option(BUILD_ODPS_FRAGMENT_LOADER "Whether to build odps fragment loader" OFF)
 option(OPTIMIZE_FOR_HOST "Whether to optimize on host" ON) # Whether to build optimized code on host
 option(BUILD_EXECUTABLES "When to build executors" OFF) # Whether to build executables, default is OFF
 option(BUILD_HTTP_SERVER "Whether to build http server" OFF) # Whether to build http server, default is OFF
@@ -75,7 +74,6 @@ option(ENABLE_LTO "Enable Link-Time Optimization" FALSE)
 option(AUTO_UPDATE_GRAMMAR "Automatically regenerate C++ grammar files on change." FALSE)
 option(BUILD_EXTENSIONS "Semicolon-separated list of extensions to build." "")
 option(BUILD_SINGLE_FILE_HEADER "Build single file header. Requires Python >= 3.9." FALSE)
-option(BUILD_TEST "Build C++ tests." TRUE)
 option(ENABLE_BACKTRACES "Enable backtrace printing for exceptions and segfaults" FALSE)
 option(BUILD_EXAMPLES "Build examples." ON)
 option(ENABLE_GCOV "Enable gcov (debug mode only)" FALSE)
@@ -106,7 +104,7 @@ endforeach()
 add_definitions(-DNEUG_CMAKE_VERSION="${CMAKE_PROJECT_VERSION}")
 
 include(CheckCXXCompilerFlag)
-
+include(cmake/neug_symbol_visibility.cmake)
 
 set(DEFAULT_BUILD_TYPE "Release")
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -281,8 +279,14 @@ macro(install_neug_target target)
         set(_neug_install_target ${target})
     endif()
 
-    get_target_property(_neug_public_headers ${_neug_install_target} PUBLIC_HEADER)
-    get_target_property(_neug_target_source_dir ${_neug_install_target} SOURCE_DIR)
+    get_target_property(_neug_target_type ${_neug_install_target} TYPE)
+    if(_neug_target_type STREQUAL "INTERFACE_LIBRARY")
+        set(_neug_public_headers "_neug_public_headers-NOTFOUND")
+        set(_neug_target_source_dir "")
+    else()
+        get_target_property(_neug_public_headers ${_neug_install_target} PUBLIC_HEADER)
+        get_target_property(_neug_target_source_dir ${_neug_install_target} SOURCE_DIR)
+    endif()
     if(_neug_public_headers AND NOT _neug_public_headers STREQUAL "_neug_public_headers-NOTFOUND" AND NOT _neug_public_headers STREQUAL "NOTFOUND")
         set(_neug_public_header_abs)
         foreach(_hdr IN LISTS _neug_public_headers)
@@ -400,11 +404,9 @@ elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
 endif()
 
 
-
 #print options
 message(STATUS "Build test: ${BUILD_TEST}")
 message(STATUS "Build doc: ${BUILD_DOC}")
-message(STATUS "Build odps fragment loader: ${BUILD_ODPS_FRAGMENT_LOADER}")
 
 # ------------------------------------------------------------------------------
 # cmake configs
@@ -429,9 +431,9 @@ function(add_neug_test TEST_NAME)
     find_package(OpenSSL REQUIRED)
     set(SRCS ${ARGN})
     add_executable(${TEST_NAME} ${SRCS})
-    target_link_libraries(${TEST_NAME} PUBLIC neug::GTest neug   
+    target_link_libraries(${TEST_NAME} PUBLIC neug::GTest neug
         ${Protobuf_LIBRARIES} ${GLOG_LIBRARIES} ${ARROW_LIB} ${OPENSSL_LIBRARIES} 
-        ${CRYPTO_LIB})
+        ${CRYPTO_LIB} ${YAML_CPP_LIBRARIES})
     if (ENABLE_GCOV)
         target_compile_options(${TEST_NAME} PRIVATE --coverage)
         target_link_options(${TEST_NAME} PRIVATE --coverage)
@@ -583,20 +585,33 @@ endif()
 
 #find arrow----------------------------------------------------------------------
 
-# Configure Arrow JSON support if json extension is enabled
-if(BUILD_EXTENSIONS AND "json" IN_LIST BUILD_EXTENSIONS)
-    set(ARROW_JSON ON CACHE BOOL "" FORCE)
-    # Use system RapidJSON instead of building it (project already has rapidjson in third_party)
-    set(RapidJSON_SOURCE "SYSTEM" CACHE STRING "" FORCE)
-    # Point Arrow to use the project's RapidJSON
-    set(RapidJSON_ROOT "${CMAKE_SOURCE_DIR}/third_party/rapidjson" CACHE PATH "" FORCE)
-    message(STATUS "Arrow JSON support enabled for json extension")
+# Always enable Arrow JSON support (built-in).
+# JSON is now a core feature since v0.1.2, not an optional extension.
+set(ARROW_JSON ON CACHE BOOL "" FORCE)
+# Use system RapidJSON instead of building it (project already has rapidjson in third_party)
+set(RapidJSON_SOURCE "SYSTEM" CACHE STRING "" FORCE)
+# Point Arrow to use the project's RapidJSON
+set(RapidJSON_ROOT "${CMAKE_SOURCE_DIR}/third_party/rapidjson" CACHE PATH "" FORCE)
+message(STATUS "Arrow JSON support enabled (built-in)")
+
+# Configure Arrow Parquet support if parquet extension is enabled
+if(BUILD_EXTENSIONS AND "parquet" IN_LIST BUILD_EXTENSIONS)
+    set(ARROW_ENABLE_PARQUET ON CACHE BOOL "" FORCE)
+    message(STATUS "Arrow Parquet support enabled for parquet extension")
+endif()
+
+# Configure Arrow S3 support if httpfs extension is enabled
+if(BUILD_EXTENSIONS AND "httpfs" IN_LIST BUILD_EXTENSIONS)
+    set(ARROW_ENABLE_S3 ON CACHE BOOL "" FORCE)
+    message(STATUS "Arrow S3 support enabled for httpfs extension")
 endif()
 
 set(NEUG_USE_SYSTEM_ARROW OFF)
-if(DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "ON")
-    set(NEUG_USE_SYSTEM_ARROW ON)
-    message(STATUS "CI=ON detected – using system-installed Arrow")
+if(DEFINED ENV{CI})
+    if("$ENV{CI}" STREQUAL "ON")
+        set(NEUG_USE_SYSTEM_ARROW ON)
+        message(STATUS "CI=ON detected – using system-installed Arrow")
+    endif()
 endif()
 
 if(NEUG_USE_SYSTEM_ARROW)
@@ -642,6 +657,7 @@ if(NEUG_USE_SYSTEM_ARROW)
     if (NOT _ARROW_BASE_TARGET)
         message(FATAL_ERROR "Failed to find Arrow library target.")
     endif()
+    set(ARROW_BASE_LIB ${_ARROW_BASE_TARGET})
     set(ARROW_LIB ${_ARROW_BASE_TARGET})
 
     set(_ARROW_LOCATION "")
@@ -671,8 +687,13 @@ if(NEUG_USE_SYSTEM_ARROW)
 
     if (_ARROW_DATASET_LIB)
         list(APPEND ARROW_LIB ${_ARROW_DATASET_LIB})
+        # Expose for extension subdirectories (e.g. parquet) that need to link
+        # against the dataset library directly instead of arrow_dataset_objlib
+        # (which only exists when Arrow is built from source).
+        set(ARROW_DATASET_LIB ${_ARROW_DATASET_LIB})
     endif()
     if (_ARROW_ACERO_LIB)
+        set(ARROW_ACERO_LIB ${_ARROW_ACERO_LIB})
         list(APPEND ARROW_LIB ${_ARROW_ACERO_LIB})
     endif()
     if (_ARROW_CSV_LIB)
@@ -680,6 +701,94 @@ if(NEUG_USE_SYSTEM_ARROW)
     endif()
     if (_ARROW_IO_LIB)
         list(APPEND ARROW_LIB ${_ARROW_IO_LIB})
+    endif()
+
+    # Resolve Parquet when the parquet extension is enabled.
+    # find_package(Parquet) must be called first to register Parquet::parquet_*
+    # targets, which resolve_system_arrow_component can then locate.
+    if(ARROW_ENABLE_PARQUET)
+        set(_SYSTEM_PARQUET_TARGET "")
+        find_package(Parquet CONFIG QUIET)
+        if(NOT Parquet_FOUND)
+            message(WARNING "System Parquet package not found; parquet extension headers may be missing")
+        else()
+            foreach(_parquet_target Parquet::parquet_static Parquet::parquet parquet_static parquet)
+                if(TARGET ${_parquet_target})
+                    set(_SYSTEM_PARQUET_TARGET ${_parquet_target})
+                    break()
+                endif()
+            endforeach()
+            # Extract Parquet include directories so extension sources and tests
+            # can find <parquet/properties.h> and <parquet/arrow/writer.h> when
+            # compiling against system Arrow.
+            #
+            # Strategy 1: read INTERFACE_INCLUDE_DIRECTORIES from the imported
+            # target. Skip generator expressions ($<...>) since
+            # include_directories() cannot resolve them as plain paths.
+            set(_parquet_inc "")
+            foreach(_parquet_target Parquet::parquet_static Parquet::parquet parquet_static parquet)
+                if(TARGET ${_parquet_target})
+                    get_target_property(_parquet_inc ${_parquet_target} INTERFACE_INCLUDE_DIRECTORIES)
+                    if(_parquet_inc AND NOT _parquet_inc MATCHES "\\$<")
+                        list(APPEND ARROW_INCLUDE_DIRS ${_parquet_inc})
+                        message(STATUS "Appended Parquet include dirs from ${_parquet_target}: ${_parquet_inc}")
+                    endif()
+                    break()
+                endif()
+            endforeach()
+            # Strategy 2: find_path fallback — used when Strategy 1 found no
+            # plain path (e.g. INTERFACE_INCLUDE_DIRECTORIES only has generator
+            # expressions, or the target was not found).
+            if(NOT _parquet_inc OR _parquet_inc MATCHES "\\$<")
+                find_path(_PARQUET_INCLUDE_DIR
+                    NAMES parquet/properties.h
+                    HINTS ${ARROW_INCLUDE_DIR} /usr/include /usr/local/include
+                    NO_DEFAULT_PATH)
+                if(NOT _PARQUET_INCLUDE_DIR)
+                    find_path(_PARQUET_INCLUDE_DIR NAMES parquet/properties.h)
+                endif()
+                if(_PARQUET_INCLUDE_DIR)
+                    list(APPEND ARROW_INCLUDE_DIRS ${_PARQUET_INCLUDE_DIR})
+                    message(STATUS "Appended Parquet include dir via find_path: ${_PARQUET_INCLUDE_DIR}")
+                else()
+                    message(WARNING "Could not locate parquet/properties.h; parquet extension may fail to compile")
+                endif()
+            endif()
+        endif()
+        # Parquet uses its own naming (Parquet::parquet_static, libparquet.a)
+        # instead of the Arrow sub-component pattern (Arrow::parquet_static,
+        # libarrow_parquet.a), so resolve_system_arrow_component does not work.
+        set(ARROW_PARQUET_LIB "")
+        foreach(_parquet_lib_target Parquet::parquet_static Parquet::parquet parquet_static parquet)
+            if(TARGET ${_parquet_lib_target})
+                set(ARROW_PARQUET_LIB ${_parquet_lib_target})
+                break()
+            endif()
+        endforeach()
+        # Fallback: search for libparquet.a / libparquet.so on disk
+        if(NOT ARROW_PARQUET_LIB AND _ARROW_LIB_DIR)
+            foreach(_pq_suffix "${CMAKE_STATIC_LIBRARY_SUFFIX}" "${CMAKE_SHARED_LIBRARY_SUFFIX}")
+                set(_pq_candidate "${_ARROW_LIB_DIR}/libparquet${_pq_suffix}")
+                if(EXISTS "${_pq_candidate}")
+                    set(ARROW_PARQUET_LIB "${_pq_candidate}")
+                    break()
+                endif()
+            endforeach()
+        endif()
+        if(ARROW_PARQUET_LIB)
+            list(APPEND ARROW_LIB ${ARROW_PARQUET_LIB})
+            message(STATUS "Found system parquet lib: ${ARROW_PARQUET_LIB}")
+        else()
+            message(WARNING "Parquet library not found; parquet extension test will fail to link")
+        endif()
+    endif()
+
+    # GNU ld scans static archives left-to-right in a single pass.  Sub-libs
+    # (dataset, acero, parquet …) reference symbols from the base arrow lib,
+    # so we append it again at the end to let ld resolve those back-references
+    # without requiring --start-group/--end-group.
+    if(NOT APPLE)
+        list(APPEND ARROW_LIB ${_ARROW_BASE_TARGET})
     endif()
 else()
     include(cmake/BuildArrowAsThirdParty.cmake)
@@ -719,9 +828,6 @@ add_definitions(-DRAPIDJSON_HAS_CXX11_RVALUE_REFS=1)
 add_definitions(-DRAPIDJSON_HAS_CXX11_RANGE_FOR=1)
 add_compile_definitions(CPPHTTPLIB_OPENSSL_SUPPORT)
 
-if (BUILD_ODPS_FRAGMENT_LOADER)
-    include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/third_party/odps/include)
-endif()
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/third_party/flat_hash_map)
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/third_party/parallel-hashmap)
 
@@ -846,7 +952,7 @@ list(FILTER FILES_NEED_FORMAT EXCLUDE REGEX ".*\.clang-format$")
 
 add_custom_target(neug_clformat
     COMMAND clang-format --style=file -i ${FILES_NEED_FORMAT}
-    COMMENT "Running clang-format, using clang-format-8 from https://github.com/muttleyxd/clang-tools-static-binaries/releases"
+    COMMENT "Running clang-format (pin: clang-format==10.0.1; install via 'python3 -m pip install clang-format==10.0.1')"
     VERBATIM)
 
 file(GLOB_RECURSE FILES_NEED_FORMAT
@@ -960,9 +1066,6 @@ install(FILES ${PROJECT_SOURCE_DIR}/third_party/fast_float/include/fast_float.h
             DESTINATION include/
 )
 
-install(FILES ${PROJECT_SOURCE_DIR}/third_party/fast_float/include/fast_float.h
-            DESTINATION include/
-)
 
 
 if (WITH_MIMALLOC)

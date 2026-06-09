@@ -14,7 +14,7 @@
  */
 
 #include "neug/execution/execute/ops/retrieve/procedure_call.h"
-#include "neug/compiler/gopt/g_catalog_holder.h"
+#include "neug/compiler/main/metadata_registry.h"
 #include "neug/utils/exception/exception.h"
 
 namespace neug {
@@ -42,13 +42,13 @@ class ProcedureCallOpr : public IOperator {
       THROW_RUNTIME_ERROR("ProcedureCallOpr: callFunction is nullptr");
     }
     return callFunction->execFunc(*callInput, graph);
-  }  // namespace ops
-};   // namespace execution
+  }
+};
 
 neug::result<OpBuildResultT> ProcedureCallOprBuilder::Build(
     const neug::Schema& schema, const ContextMeta& ctx_meta,
     const physical::PhysicalPlan& plan, int op_idx) {
-  auto gCatalog = catalog::GCatalogHolder::getGCatalog();
+  auto gCatalog = neug::main::MetadataRegistry::getCatalog();
   auto procedurePB = plan.plan(op_idx).opr().procedure_call();
   auto signatureName = procedurePB.query().query_name().name();
   auto func = gCatalog->getFunctionWithSignature(signatureName);
