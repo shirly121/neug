@@ -41,6 +41,8 @@
 
 namespace neug {
 
+class IndexManager;
+
 namespace execution {
 class EdgeRecord;
 }
@@ -175,6 +177,9 @@ class PropertyGraph {
    * @since v0.1.0
    */
   Schema& mutable_schema();
+
+  IndexManager& index_manager();
+  const IndexManager& index_manager() const;
 
   /**
    * @brief Clear all graph data and reset to empty state.
@@ -616,6 +621,7 @@ class PropertyGraph {
 
   std::shared_ptr<Checkpoint> ckp_;
   Schema schema_;
+  std::unique_ptr<IndexManager> index_manager_;
   std::vector<std::shared_ptr<std::mutex>> v_mutex_;
   std::vector<VertexTable> vertex_tables_;
   std::unordered_map<uint32_t, EdgeTable> edge_tables_;

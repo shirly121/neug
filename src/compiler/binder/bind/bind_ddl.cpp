@@ -20,9 +20,12 @@
  * Zhou Xiaoli in 2025 to support Neug-specific features.
  */
 
+#include <algorithm>
+
 #include "neug/compiler/binder/binder.h"
 #include "neug/compiler/binder/ddl/bound_alter.h"
 #include "neug/compiler/binder/ddl/bound_create_index.h"
+#include "neug/compiler/binder/expression/node_expression.h"
 #include "neug/compiler/binder/ddl/bound_create_sequence.h"
 #include "neug/compiler/binder/ddl/bound_create_table.h"
 #include "neug/compiler/binder/ddl/bound_create_type.h"
@@ -410,7 +413,62 @@ std::unique_ptr<BoundStatement> Binder::bindCreateSequence(
 std::unique_ptr<BoundStatement> Binder::bindCreateIndex(
     const Statement& statement) {
   auto& createIndex = statement.constCast<CreateIndex>();
-  return std::make_unique<BoundCreateIndex>(createIndex.getInfo());
+  const auto& parsedInfo = createIndex.getInfo();
+
+  // 1. Validate table exists in catalog
+  validateTableExistence(*clientContext, parsedInfo.tableName);
+
+  // 2. Get table entry, validate it's NODE_TABLE_ENTRY
+  auto* tableEntry = clientContext->getCatalog()->getTableCatalogEntry(
+      clientContext->getTransaction(), parsedInfo.tableName);
+  if (tableEntry->getType() != catalog::CatalogEntryType::NODE_TABLE_ENTRY) {
+    THROW_BINDER_EXCEPTION(
+        "Index can only be created on node tables, but " +
+        parsedInfo.tableName + " is of type " +
+        catalog::CatalogEntryTypeUtils::toString(tableEntry->getType()) + ".");
+  }
+
+  // 3. Create NodeExpression pattern
+  auto pattern = std::make_shared<NodeExpression>(
+      LogicalType(LogicalTypeID::NODE), parsedInfo.tableName,
+      parsedInfo.tableName,
+      std::vector<catalog::TableCatalogEntry*>{tableEntry});
+
+  // 4. Validate each property exists, get types
+  std::vector<LogicalType> propertyTypes;
+  for (const auto& propName : parsedInfo.propertyNames) {
+    validateColumnExistence(tableEntry, propName);
+    const auto& propDef = tableEntry->getProperty(propName);
+    propertyTypes.push_back(propDef.getType().copy());
+  }
+
+  // 5. Build function name and look up from catalog
+  std::string indexTypeUpper = parsedInfo.indexType;
+  std::transform(indexTypeUpper.begin(), indexTypeUpper.end(),
+                 indexTypeUpper.begin(), ::toupper);
+  std::string funcName = "CREATE_" + indexTypeUpper + "_INDEX";
+
+  // Look up function from catalog -- error if not registered
+  auto* catalog = clientContext->getCatalog();
+  auto* funcEntry = catalog->getFunctionEntry(
+      clientContext->getTransaction(), funcName);
+  auto* funcCatalogEntry =
+      neug_dynamic_cast<catalog::FunctionCatalogEntry*>(funcEntry);
+  auto& funcSet = funcCatalogEntry->getFunctionSet();
+  auto& indexCreateFunc =
+      *funcSet[0]->ptrCast<function::TableFunction>();
+
+  // 6. Build BoundCreateIndexInfo
+  BoundCreateIndexInfo boundInfo;
+  boundInfo.indexName = parsedInfo.indexName;
+  boundInfo.pattern = std::move(pattern);
+  boundInfo.propertyNames = parsedInfo.propertyNames;
+  boundInfo.propertyTypes = std::move(propertyTypes);
+  boundInfo.indexCreateFunc = indexCreateFunc;
+  boundInfo.options = parsedInfo.options;
+  boundInfo.ifNotExists = parsedInfo.ifNotExists;
+
+  return std::make_unique<BoundCreateIndex>(std::move(boundInfo));
 }
 
 std::unique_ptr<BoundStatement> Binder::bindDrop(const Statement& statement) {

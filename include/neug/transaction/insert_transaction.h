@@ -210,6 +210,11 @@ class StorageTPInsertInterface : public StorageInsertInterface {
 
   inline const Schema& schema() const override { return txn_.schema(); }
 
+  IndexManager& index_manager() override { return txn_.graph().index_manager(); }
+  const IndexManager& index_manager() const override {
+    return txn_.graph().index_manager();
+  }
+
   bool GetVertexIndex(label_t label, const Property& id,
                       vid_t& index) const override {
     return txn_.GetVertexIndex(label, id, index);

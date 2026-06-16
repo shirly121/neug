@@ -1,1 +1,1 @@
-{"plan":[{"opr":{"create_index":{"name":"vec_hnsw_index","vertex_type":{"name":"User"},"index_type":"HNSW","properties":["name","age"],"options":{},"conflict_action":"ON_CONFLICT_THROW"}},"meta_data":[]}]}
+{"plan":[{"opr":{"create_index":{"name":"vec_hnsw_index","vertex_type":{"id":1},"create_index_type":"CREATE_HNSW_INDEX()","properties":["embedding","label"],"property_types":[{"array":{"component_type":{"primitive_type":"DT_FLOAT"},"max_length":128}},{"string":{"var_char":{"max_length":256}}}],"options":{},"conflict_action":"ON_CONFLICT_THROW"}},"meta_data":[]}]}

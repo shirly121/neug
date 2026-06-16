@@ -29,6 +29,7 @@
 #include "neug/compiler/catalog/catalog_entry/node_table_catalog_entry.h"
 #include "neug/compiler/catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "neug/compiler/catalog/catalog_entry/rel_table_catalog_entry.h"
+#include "neug/compiler/catalog/catalog_entry/rule_catalog_entry.h"
 #include "neug/compiler/catalog/catalog_entry/scalar_macro_catalog_entry.h"
 #include "neug/compiler/catalog/catalog_entry/sequence_catalog_entry.h"
 #include "neug/compiler/catalog/catalog_entry/type_catalog_entry.h"
@@ -63,6 +64,7 @@ void Catalog::initCatalogSets() {
   functions = std::make_unique<CatalogSet>();
   types = std::make_unique<CatalogSet>();
   indexes = std::make_unique<CatalogSet>();
+  rules = std::make_unique<CatalogSet>();
   internalTables = std::make_unique<CatalogSet>(true /* isInternal */);
   internalSequences = std::make_unique<CatalogSet>(true /* isInternal */);
   internalFunctions = std::make_unique<CatalogSet>(true /* isInternal */);
@@ -452,6 +454,30 @@ void Catalog::dropFunction(Transaction* transaction, const std::string& name) {
   }
   auto entry = getFunctionEntry(transaction, name);
   functions->dropEntry(transaction, name, entry->getOID());
+}
+
+bool Catalog::containsRule(const Transaction* transaction,
+                           const std::string& name) const {
+  return rules->containsEntry(transaction, name);
+}
+
+void Catalog::addRule(Transaction* transaction, std::string name,
+                      std::unique_ptr<optimizer::LogicalRule> rule) {
+  if (rules->containsEntry(transaction, name)) {
+    THROW_CATALOG_EXCEPTION(stringFormat("rule {} already exists.", name));
+  }
+  rules->createEntry(
+      transaction,
+      std::make_unique<RuleCatalogEntry>(std::move(name), std::move(rule)));
+}
+
+std::vector<RuleCatalogEntry*> Catalog::getRuleEntries(
+    const Transaction* transaction) const {
+  std::vector<RuleCatalogEntry*> result;
+  for (auto& [_, entry] : rules->getEntries(transaction)) {
+    result.push_back(entry->ptrCast<RuleCatalogEntry>());
+  }
+  return result;
 }
 
 CatalogEntry* Catalog::getFunctionEntry(const Transaction* transaction,

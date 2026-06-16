@@ -85,7 +85,9 @@ class TestCreateIndex:
         conn.execute(
             "CREATE NODE TABLE User(id INT64 PRIMARY KEY, name STRING, age INT64);"
         )
-        conn.execute("CREATE INDEX idx_user_age ON User USING HNSW (age);")
+        conn.execute(
+            "CREATE INDEX idx_user_age ON User USING HNSW (age);"
+        )
         conn.close()
         db.close()
 
@@ -133,7 +135,9 @@ class TestCreateIndex:
             "CREATE NODE TABLE User(id INT64 PRIMARY KEY, name STRING, age INT64);"
         )
         conn.execute("CREATE (:User {id: 1, name: 'Alice', age: 30});")
-        conn.execute("CREATE INDEX idx_user_age ON User USING HNSW (age);")
+        conn.execute(
+            "CREATE INDEX idx_user_age ON User USING HNSW (age);"
+        )
         conn.close()
         db.close()
 
@@ -150,7 +154,9 @@ class TestCreateIndex:
         conn.execute("CREATE (:User {id: 1, name: 'Alice', age: 30});")
         conn.execute("CREATE (:User {id: 2, name: 'Bob', age: 25});")
         conn.execute("CREATE (:User {id: 3, name: 'Charlie', age: 35});")
-        conn.execute("CREATE INDEX idx_user_age ON User USING HNSW (age);")
+        conn.execute(
+            "CREATE INDEX idx_user_age ON User USING HNSW (age);"
+        )
         conn.close()
         db.close()
 
@@ -164,6 +170,8 @@ class TestCreateIndex:
         conn.execute(
             "CREATE NODE TABLE User(id INT64 PRIMARY KEY, name STRING, age INT64);"
         )
-        conn.execute("CREATE INDEX idx_user_name_age ON User USING HNSW (name, age);")
+        conn.execute(
+            "CREATE INDEX idx_user_name_age ON User USING HNSW (name, age);"
+        )
         conn.close()
         db.close()

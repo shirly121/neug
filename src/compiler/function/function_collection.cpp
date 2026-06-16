@@ -27,6 +27,7 @@
 #include "neug/compiler/function/arithmetic/vector_arithmetic_functions.h"
 #include "neug/compiler/function/cast/vector_cast_functions.h"
 #include "neug/compiler/function/comparison/vector_comparison_functions.h"
+#include "neug/compiler/function/hnsw_index_scan_function.h"
 #include "neug/compiler/function/import/csv_read_function.h"
 #include "neug/compiler/function/import/json_read_function.h"
 #include "neug/compiler/function/export/json_export_function.h"
@@ -151,6 +152,7 @@ FunctionCollection* FunctionCollection::getFunctions() {
       SCALAR_FUNCTION(ReverseFunction),
 
       TABLE_FUNCTION(ShowLoadedExtensionsFunction),
+      TABLE_FUNCTION(HNSWIndexScanFunction),
       TABLE_FUNCTION(CSVReadFunction),
       TABLE_FUNCTION(JsonReadFunction),
       TABLE_FUNCTION(JsonLReadFunction),

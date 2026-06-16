@@ -61,6 +61,8 @@ class IndexManager {
                   const std::vector<std::string>& property_names,
                   std::vector<Index*>& target_indexes);
 
+  Index* GetIndexByName(const std::string& name) const;
+
   /**
    * @brief Get all registered indexes.
    */

@@ -89,6 +89,14 @@ Status IndexManager::GetIndex(const std::string& label_name,
   return Status::OK();
 }
 
+Index* IndexManager::GetIndexByName(const std::string& name) const {
+  auto it = indexes_.find(name);
+  if (it == indexes_.end() || !it->second) {
+    return nullptr;
+  }
+  return it->second.get();
+}
+
 Status IndexManager::GetAllIndexes(std::vector<Index*>& target_indexes) {
   for (auto& [name, index] : indexes_) {
     if (index) {
@@ -111,8 +119,11 @@ void IndexManager::Open(Checkpoint& ckp, ModuleBroker& store,
       continue;
     }
 
-    indexes_[key] = std::shared_ptr<Index>(index.release());
-    LOG(INFO) << "Opened index: " << key << " (type=" << desc.module_type
+    auto index_name = index->GetMeta().name.empty()
+                          ? key.substr(strlen(kIndexPrefix))
+                          : index->GetMeta().name;
+    indexes_[index_name] = std::shared_ptr<Index>(index.release());
+    LOG(INFO) << "Opened index: " << index_name << " (type=" << desc.module_type
               << ")";
   }
 }

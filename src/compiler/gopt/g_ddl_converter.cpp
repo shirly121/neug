@@ -775,16 +775,27 @@ void GDDLConverter::convertCreateIndex(const planner::LogicalCreateIndex& op,
   // Set index name
   create_index->set_name(info.indexName);
 
-  // Set vertex type
-  auto* vertex_type = create_index->mutable_vertex_type();
-  vertex_type->set_name(info.tableName);
+  // Validate pattern is NODE type
+  auto* entry = info.pattern->getSingleEntry();
+  if (entry->getType() != catalog::CatalogEntryType::NODE_TABLE_ENTRY) {
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "CREATE INDEX only supports node tables, got: " + entry->getName());
+  }
+  create_index->mutable_vertex_type()->set_id(entry->getTableID());
 
-  // Set index type
-  create_index->set_index_type(info.indexType);
+  // Function signature name
+  create_index->set_create_index_type(info.indexCreateFunc.signatureName);
 
   // Set properties
   for (const auto& prop : info.propertyNames) {
     create_index->add_properties(prop);
+  }
+
+  // Set property types
+  for (const auto& logicalType : info.propertyTypes) {
+    auto irType = typeConverter.convertLogicalType(logicalType);
+    *create_index->add_property_types() =
+        std::move(*irType->mutable_data_type());
   }
 
   // Set options

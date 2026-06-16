@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "neug/storages/index/index_manager.h"
 #include "neug/utils/pb_utils.h"
 
 namespace neug {
@@ -42,9 +43,41 @@ class CreateIndexOpr : public IOperator {
 
   neug::result<Context> Eval(IStorageInterface& graph, const ParamsMap& params,
                              Context&& ctx, OprTimer* timer) override {
-    // TODO: Implement actual index creation via storage interface
-    // For now, this is a placeholder that will be connected to the
-    // vector index storage layer in a future phase.
+    IndexMeta meta;
+    meta.name = index_name_;
+    meta.type = index_type_;
+    for (const auto& [key, value] : options_) {
+      meta.options[key] = value;
+    }
+    meta.schema.label.type = EntryType::VERTEX;
+    meta.schema.label.label_name = vertex_type_;
+    meta.schema.label.label_id = graph.schema().get_vertex_label_id(vertex_type_);
+    meta.schema.property_names = properties_;
+
+    const auto vertex_schema =
+        graph.schema().get_vertex_schema(meta.schema.label.label_id);
+    for (const auto& prop : properties_) {
+      bool found = false;
+      for (size_t i = 0; i < vertex_schema->property_names.size(); ++i) {
+        if (vertex_schema->property_names[i] == prop) {
+          meta.schema.property_types.push_back(vertex_schema->property_types[i]);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        RETURN_ERROR(Status(StatusCode::ERR_INVALID_ARGUMENT,
+                            "Property not found for index: " + prop));
+      }
+    }
+
+    auto created = graph.index_manager().CreateIndex(index_name_, meta);
+    if (!created) {
+      if (ignore_conflict_ && IsSchemaConflictError(created.error())) {
+        return neug::result<Context>(std::move(ctx));
+      }
+      RETURN_ERROR(created.error());
+    }
     return neug::result<Context>(std::move(ctx));
   }
 
@@ -65,7 +98,8 @@ neug::result<OpBuildResultT> CreateIndexOprBuilder::Build(
 
   std::string index_name = create_index.name();
   std::string vertex_type = create_index.vertex_type().name();
-  std::string index_type = create_index.index_type();
+  // TODO: update after proto change (index_type renamed to create_index_type)
+  std::string index_type = create_index.create_index_type();
 
   std::vector<std::string> properties;
   for (const auto& prop : create_index.properties()) {

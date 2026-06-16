@@ -76,6 +76,14 @@ struct IndexQueryParams {
 
 struct IndexFilterParams {};
 
+enum class MetricType : uint8_t { L2 = 0, COSINE = 1, INNER_PRODUCT = 2 };
+
+struct HNSWIndexQueryParams : IndexQueryParams {
+  std::vector<float> target_vec;
+  int topK = 0;
+  MetricType metric_type = MetricType::L2;
+};
+
 // --- Index base class ---
 
 /**
@@ -89,10 +97,12 @@ struct IndexFilterParams {};
  */
 class Index : public Module {
  public:
-  Index() : meta_(std::make_unique<IndexMeta>()) {}
+  Index()
+      : meta_(std::make_unique<IndexMeta>()),
+        doc_id_map_(std::make_unique<DocIDMap>()) {}
 
   Index(std::string name, std::unique_ptr<IndexMeta> meta)
-      : meta_(std::move(meta)) {
+      : meta_(std::move(meta)), doc_id_map_(std::make_unique<DocIDMap>()) {
     meta_->name = std::move(name);
   }
 

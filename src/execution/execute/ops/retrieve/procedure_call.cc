@@ -15,6 +15,7 @@
 
 #include "neug/execution/execute/ops/retrieve/procedure_call.h"
 #include "neug/compiler/main/metadata_registry.h"
+#include "neug/common/types.h"
 #include "neug/utils/exception/exception.h"
 
 namespace neug {
@@ -54,6 +55,10 @@ neug::result<OpBuildResultT> ProcedureCallOprBuilder::Build(
   auto func = gCatalog->getFunctionWithSignature(signatureName);
   auto callFunc = func->ptrCast<function::NeugCallFunction>();
   ContextMeta ret_meta = ctx_meta;
+  for (int i = 0; i < plan.plan(op_idx).meta_data_size(); ++i) {
+    const auto& meta = plan.plan(op_idx).meta_data(i);
+    ret_meta.set(meta.alias(), parse_from_ir_data_type(meta.type()));
+  }
 
   return std::make_pair(
       std::make_unique<ProcedureCallOpr>(

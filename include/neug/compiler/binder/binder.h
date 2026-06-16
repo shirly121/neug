@@ -154,7 +154,7 @@ class Binder {
   std::unique_ptr<BoundStatement> bindCreateSequence(
       const parser::Statement& statement) const;
 
-  static std::unique_ptr<BoundStatement> bindCreateIndex(
+  std::unique_ptr<BoundStatement> bindCreateIndex(
       const parser::Statement& statement);
   static std::unique_ptr<BoundStatement> bindDrop(
       const parser::Statement& statement);

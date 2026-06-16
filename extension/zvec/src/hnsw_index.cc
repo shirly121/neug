@@ -154,23 +154,23 @@ Status HNSWIndex::AppendImpl(vid_t vid, doc_id_t doc_id,
 Status HNSWIndex::Search(const IndexQueryParams& params,
                          const IndexFilterParams& filter_params,
                          std::vector<vid_t>& results) {
-  auto& hnsw_params = dynamic_cast<const HNSWIndexQueryParams&>(params);
+  auto& hnsw_params = dynamic_cast<const neug::HNSWIndexQueryParams&>(params);
 
-  if (hnsw_params.dimension != dimension_) {
+  if (static_cast<int>(hnsw_params.target_vec.size()) != dimension_) {
     return Status::RuntimeError("[zvec] Search dimension mismatch: expected " +
                                 std::to_string(dimension_) + ", got " +
-                                std::to_string(hnsw_params.dimension));
+                                std::to_string(hnsw_params.target_vec.size()));
   }
 
   // Build query param
   auto search_param = std::make_shared<HNSWQueryParam>();
-  search_param->topk = hnsw_params.topk;
+  search_param->topk = hnsw_params.topK;
   search_param->ef_search =
-      std::max(static_cast<uint32_t>(hnsw_params.topk), kDefaultHnswEfSearch);
+      std::max(static_cast<uint32_t>(hnsw_params.topK), kDefaultHnswEfSearch);
 
   // TODO: Build MVCC filter from IndexFilterParams when filter support is added
 
-  VectorData qd{DenseVector{hnsw_params.query_vector}};
+  VectorData qd{DenseVector{hnsw_params.target_vec.data()}};
   SearchResult result;
   int ret = zvec_index_->Search(qd, search_param, &result);
   if (ret != 0) {

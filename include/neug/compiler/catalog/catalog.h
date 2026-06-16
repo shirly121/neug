@@ -50,6 +50,10 @@ namespace function {
 struct ScalarMacroFunction;
 }  // namespace function
 
+namespace optimizer {
+class LogicalRule;
+}  // namespace optimizer
+
 namespace storage {
 class WAL;
 }  // namespace storage
@@ -70,6 +74,7 @@ class RelGroupCatalogEntry;
 class FunctionCatalogEntry;
 class SequenceCatalogEntry;
 class IndexCatalogEntry;
+class RuleCatalogEntry;
 
 class NEUG_API Catalog {
   friend class main::AttachedKuzuDatabase;
@@ -249,6 +254,15 @@ class NEUG_API Catalog {
   void dropFunction(transaction::Transaction* transaction,
                     const std::string& name);
 
+  // ----------------------------- Optimizer rules ----------------------------
+
+  bool containsRule(const transaction::Transaction* transaction,
+                    const std::string& name) const;
+  void addRule(transaction::Transaction* transaction, std::string name,
+               std::unique_ptr<optimizer::LogicalRule> rule);
+  std::vector<RuleCatalogEntry*> getRuleEntries(
+      const transaction::Transaction* transaction) const;
+
   // ----------------------------- Macro ----------------------------
 
   // Check if macro entry exists.
@@ -304,6 +318,7 @@ class NEUG_API Catalog {
   std::unique_ptr<CatalogSet> functions;
   std::unique_ptr<CatalogSet> types;
   std::unique_ptr<CatalogSet> indexes;
+  std::unique_ptr<CatalogSet> rules;
   std::unique_ptr<CatalogSet> internalTables;
   std::unique_ptr<CatalogSet> internalSequences;
   std::unique_ptr<CatalogSet> internalFunctions;

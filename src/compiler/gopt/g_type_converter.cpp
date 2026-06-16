@@ -136,21 +136,25 @@ std::unique_ptr<::common::IrDataType> GPhysicalTypeConverter::convertStructType(
 }
 
 std::unique_ptr<::common::IrDataType> GPhysicalTypeConverter::convertArrayType(
-    const common::LogicalType& type) {
+    const common::LogicalType& childType, uint64_t numElements) {
   auto result = std::make_unique<::common::IrDataType>();
-  VLOG(1) << "Converting ARRAY child type: " << type.toString();
-  auto childType = convertLogicalType(type);
-  if (!childType) {
+  VLOG(1) << "Converting ARRAY child type: " << childType.toString();
+  auto convertedChild = convertLogicalType(childType);
+  if (!convertedChild) {
     THROW_EXCEPTION_WITH_FILE_LINE(
-        "Failed to convert child type for ARRAY type: " + type.toString());
+        "Failed to convert child type for ARRAY type: " +
+        childType.toString());
   }
-  if (childType->has_graph_type()) {
+  if (convertedChild->has_graph_type()) {
     auto listType = std::make_unique<::common::GraphTypeList>();
-    listType->set_allocated_component_type(childType->release_graph_type());
+    listType->set_allocated_component_type(
+        convertedChild->release_graph_type());
     result->set_allocated_list_type(listType.release());
-  } else if (childType->has_data_type()) {
+  } else if (convertedChild->has_data_type()) {
     auto arrayType = std::make_unique<::common::Array>();
-    arrayType->set_allocated_component_type(childType->release_data_type());
+    arrayType->set_allocated_component_type(
+        convertedChild->release_data_type());
+    arrayType->set_max_length(numElements);
     result->mutable_data_type()->set_allocated_array(arrayType.release());
   } else {
     LOG(WARNING) << "Component type of Array should be basic or graph element, "
@@ -275,7 +279,7 @@ GPhysicalTypeConverter::convertLogicalType(const common::LogicalType& type) {
             const_off);
     CHECK(array_type_info) << "Expected ArrayTypeInfo for ARRAY type, ";
     auto& child_type = array_type_info->getChildType();
-    return convertArrayType(child_type);
+    return convertArrayType(child_type, array_type_info->getNumElements());
     break;
   }
   case common::LogicalTypeID::LIST: {
@@ -290,7 +294,7 @@ GPhysicalTypeConverter::convertLogicalType(const common::LogicalType& type) {
         neug::common::neug_dynamic_cast<neug::common::ListTypeInfo*>(const_off);
     CHECK(list_type_info) << "Expected ListTypeInfo for LIST type, ";
     auto& child_type = list_type_info->getChildType();
-    return convertArrayType(child_type);
+    return convertArrayType(child_type, 0);
     break;
   }
   case common::LogicalTypeID::STRUCT: {

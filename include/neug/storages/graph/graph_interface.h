@@ -77,6 +77,9 @@ class IStorageInterface {
   /** @brief Get the graph schema. */
   virtual const Schema& schema() const = 0;
 
+  virtual IndexManager& index_manager() = 0;
+  virtual const IndexManager& index_manager() const = 0;
+
   /**
    * @brief Get internal vertex index from external ID.
    *
@@ -154,6 +157,12 @@ class StorageReadInterface : virtual public IStorageInterface {
   ~StorageReadInterface() {}
   bool readable() const override { return true; }
   bool writable() const override { return false; }
+  IndexManager& index_manager() override {
+    return const_cast<PropertyGraph&>(graph_).index_manager();
+  }
+  const IndexManager& index_manager() const override {
+    return graph_.index_manager();
+  }
 
   /**
    * @brief Get a typed property column for vertices.

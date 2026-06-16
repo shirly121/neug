@@ -59,6 +59,17 @@ class ExtensionAPI {
                                        T::alias::getFunctionSet(), false);
   }
 
+  template <typename T>
+  static void registerRule() {
+    auto gCatalog = neug::main::MetadataRegistry::getCatalog();
+    if (gCatalog->containsRule(&neug::transaction::DUMMY_TRANSACTION,
+                               T::name)) {
+      return;
+    }
+    gCatalog->addRule(&neug::transaction::DUMMY_TRANSACTION, T::name,
+                      std::make_unique<T>());
+  }
+
   // Register file system factory for specific protocol.
   // For example, register "file" protocol file system factory:
   // registerFileSystem("file", [](const reader::FileSchema& schema) {

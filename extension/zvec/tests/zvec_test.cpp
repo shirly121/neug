@@ -132,9 +132,8 @@ TEST_F(HNSWIndexLifecycleTest, OpenDumpAppendSearch) {
 
     auto query = MakeVector(kDimension, 2.1f);
     HNSWIndexQueryParams params;
-    params.query_vector = query.data();
-    params.dimension = kDimension;
-    params.topk = 4;
+    params.target_vec = query;
+    params.topK = 4;
 
     neug::IndexFilterParams filter_params;
     std::vector<vid_t> results;
@@ -200,9 +199,8 @@ class HNSWIndexAdvancedTest : public ::testing::Test {
   std::vector<vid_t> DoSearch(HNSWIndex& index, float query_value, int topk) {
     auto query = MakeVector(kDimension, query_value);
     HNSWIndexQueryParams params;
-    params.query_vector = query.data();
-    params.dimension = kDimension;
-    params.topk = topk;
+    params.target_vec = query;
+    params.topK = topk;
 
     neug::IndexFilterParams filter_params;
     std::vector<vid_t> results;

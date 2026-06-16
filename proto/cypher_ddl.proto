@@ -151,12 +151,14 @@ message CreateIndexOpr {
     string name = 1;
     // Vertex type the index is bound to
     common.NameOrId vertex_type = 2;
-    // Index algorithm type: "HNSW", "IVF", etc.
-    string index_type = 3;
+    // Create index function name: "CREATE_HNSW_INDEX", "CREATE_IVF_INDEX", etc.
+    string create_index_type = 3;
     // Property names to index
     repeated string properties = 4;
+    // Property types resolved from catalog
+    repeated common.DataType property_types = 5;
     // WITH clause options (metric, m, ef_construction, ...)
-    map<string, string> options = 5;
+    map<string, string> options = 6;
     // Conflict handling
-    ConflictAction conflict_action = 6;
+    ConflictAction conflict_action = 7;
 }

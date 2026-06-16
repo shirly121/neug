@@ -18,6 +18,7 @@ add_library(neug_function
         comparison_functions.cpp
         function.cpp
         function_collection.cpp
+        hnsw_index_scan_function.cpp
         scalar_macro_function.cpp
         show_loaded_extensions_function.cpp
         vector_arithmetic_functions.cpp

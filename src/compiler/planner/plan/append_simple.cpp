@@ -68,14 +68,7 @@ void Planner::appendCreateSequence(const BoundStatement& statement,
 void Planner::appendCreateIndex(const BoundStatement& statement,
                                 LogicalPlan& plan) {
   auto& boundCreateIndex = statement.constCast<BoundCreateIndex>();
-  const auto& parsedInfo = boundCreateIndex.getInfo();
-  CreateIndexInfo info;
-  info.indexName = parsedInfo.indexName;
-  info.tableName = parsedInfo.tableName;
-  info.indexType = parsedInfo.indexType;
-  info.propertyNames = parsedInfo.propertyNames;
-  info.options = parsedInfo.options;
-  info.ifNotExists = parsedInfo.ifNotExists;
+  auto info = const_cast<BoundCreateIndex&>(boundCreateIndex).moveInfo();
   auto op = std::make_shared<LogicalCreateIndex>(std::move(info));
   plan.setLastOperator(std::move(op));
 }

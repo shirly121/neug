@@ -19,7 +19,7 @@
 namespace neug {
 namespace execution {
 bool is_pk_oid_exact_check(const neug::Schema& schema, label_t label,
-                           const common::Expression& expr) {
+                           const ::common::Expression& expr) {
   if (expr.operators_size() != 3) {
     return false;
   }
@@ -60,7 +60,7 @@ bool is_pk_oid_exact_check(const neug::Schema& schema, label_t label,
   return false;
 }
 
-SPPredicateType parse_sp_pred(const common::Expression& expr) {
+SPPredicateType parse_sp_pred(const ::common::Expression& expr) {
   if (expr.operators_size() != 3) {
     return SPPredicateType::kUnknown;
   }
@@ -97,7 +97,7 @@ SPPredicateType parse_sp_pred(const common::Expression& expr) {
 
 bool is_special_edge_predicate(const Schema& schema,
                                const std::vector<LabelTriplet>& labels,
-                               const common::Expression& expr,
+                               const ::common::Expression& expr,
                                SpecialPredicateConfig& config) {
   if (expr.operators_size() == 3) {
     const common::ExprOpr& op0 = expr.operators(0);
@@ -170,7 +170,7 @@ bool is_special_edge_predicate(const Schema& schema,
 
 bool is_special_vertex_predicate(const Schema& schema,
                                  const std::vector<label_t>& labels,
-                                 const common::Expression& expr,
+                                 const ::common::Expression& expr,
                                  SpecialPredicateConfig& config) {
   if (expr.operators_size() == 3) {
     const common::ExprOpr& op0 = expr.operators(0);

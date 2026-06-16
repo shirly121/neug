@@ -30,6 +30,7 @@
 #include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/checkpoint_manifest.h"
 #include "neug/storages/graph/schema.h"
+#include "neug/storages/index/index_manager.h"
 #include "neug/storages/module/module_broker.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/file_utils.h"
@@ -42,6 +43,7 @@ namespace neug {
 
 PropertyGraph::PropertyGraph()
     : ckp_(nullptr),
+      index_manager_(std::make_unique<IndexManager>()),
       vertex_label_total_count_(0),
       edge_label_total_count_(0),
       memory_level_(MemoryLevel::kInMemory) {}
@@ -56,10 +58,17 @@ void PropertyGraph::loadSchema(const std::string& schema_path) {
 void PropertyGraph::Clear() {
   vertex_tables_.clear();
   edge_tables_.clear();
+  index_manager_ = std::make_unique<IndexManager>();
   vertex_label_total_count_ = 0;
   edge_label_total_count_ = 0;
   schema_.Clear();
   ckp_.reset();
+}
+
+IndexManager& PropertyGraph::index_manager() { return *index_manager_; }
+
+const IndexManager& PropertyGraph::index_manager() const {
+  return *index_manager_;
 }
 
 Status PropertyGraph::EnsureCapacity(label_t v_label, size_t capacity) {
@@ -746,6 +755,7 @@ void PropertyGraph::Open(std::shared_ptr<Checkpoint> ckp,
 
   ModuleBroker store;
   store.Open(*ckp, memory_level_);
+  index_manager_->Open(*ckp, store, meta, memory_level_);
 
   std::vector<size_t> vertex_capacities(vertex_label_total_count_, 0);
   for (size_t i = 0; i < vertex_label_total_count_; ++i) {
@@ -950,6 +960,7 @@ void PropertyGraph::Dump(std::shared_ptr<Checkpoint> ckp, bool reopen) {
     }
   }
 
+  index_manager_->Dump(*ckp, meta);
   store.Dump(*ckp, meta);
   meta.SetSchema(schema_);
   ckp->UpdateMeta(

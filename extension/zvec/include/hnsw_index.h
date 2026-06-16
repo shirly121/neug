@@ -28,15 +28,6 @@ namespace neug::extension::zvec_ext {
 using MetricType = zvec::core_interface::MetricType;
 
 /**
- * @brief HNSW-specific query parameters.
- */
-struct HNSWIndexQueryParams : neug::IndexQueryParams {
-  const void* query_vector = nullptr;
-  int dimension = 0;
-  int topk = 10;
-};
-
-/**
  * @brief HNSW index implementation backed by ZVec.
  *
  * Directly inherits neug::Index (which inherits Module).
