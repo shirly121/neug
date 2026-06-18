@@ -53,7 +53,7 @@ class HNSWIndex : public neug::Index {
                 const IndexFilterParams& filter_params,
                 std::vector<vid_t>& results) override;
   Status Delete(vid_t vid) override;
-  std::shared_ptr<Index> Fork() const override;
+  std::unique_ptr<Index> Fork() const override;
   void LazyFork() override;
 
  protected:

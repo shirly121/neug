@@ -41,6 +41,8 @@ static constexpr vid_t INVALID_VID = std::numeric_limits<vid_t>::max();
 class DocIDMap : public Module {
  public:
   static constexpr size_t kDefaultCapacity = 1024;
+  static constexpr const char* kNextDocIDKey = "next_doc_id";
+  static constexpr const char* kDocIDBufferPathKey = "doc_id_buffer";
 
   DocIDMap() = default;
   ~DocIDMap() override = default;

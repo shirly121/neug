@@ -191,7 +191,7 @@ IndexMeta IndexMeta::FromJsonString(const std::string& json_str) {
 
 void Index::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                  MemoryLevel level) {
-  auto index_meta_str = descriptor.get("index_meta");
+  auto index_meta_str = descriptor.get(kIndexMetaKey);
   if (index_meta_str.has_value()) {
     meta_ = std::make_unique<IndexMeta>(
         IndexMeta::FromJsonString(index_meta_str.value()));
@@ -204,17 +204,17 @@ void Index::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
 ModuleDescriptor Index::Dump(Checkpoint& ckp) {
   ModuleDescriptor desc;
   // Do not set module_type here — subclasses set their specific type.
-  desc.set("index_meta", meta_->ToJsonString());
+  desc.set(kIndexMetaKey, meta_->ToJsonString());
 
   if (doc_id_map_) {
     auto doc_desc = doc_id_map_->Dump(ckp);
-    auto next_doc_id = doc_desc.get("next_doc_id");
+    auto next_doc_id = doc_desc.get(DocIDMap::kNextDocIDKey);
     if (next_doc_id.has_value()) {
-      desc.set("next_doc_id", next_doc_id.value());
+      desc.set(DocIDMap::kNextDocIDKey, next_doc_id.value());
     }
-    auto doc_buffer = doc_desc.get_path("doc_id_buffer");
+    auto doc_buffer = doc_desc.get_path(DocIDMap::kDocIDBufferPathKey);
     if (doc_buffer.has_value()) {
-      desc.set_path("doc_id_buffer", doc_buffer.value());
+      desc.set_path(DocIDMap::kDocIDBufferPathKey, doc_buffer.value());
     }
   }
 

@@ -42,6 +42,7 @@
 namespace neug {
 
 class IndexManager;
+class ModuleBroker;
 
 namespace execution {
 class EdgeRecord;
@@ -128,6 +129,8 @@ class PropertyGraph {
    * meta the graph starts empty.
    */
   void Open(std::shared_ptr<Checkpoint> ckp, MemoryLevel memory_level);
+  void Open(std::shared_ptr<Checkpoint> ckp, ModuleBroker& store,
+            IndexManager* index_manager, MemoryLevel memory_level);
 
   void Compact(bool compact_csr, float reserve_ratio, timestamp_t ts);
 
@@ -136,6 +139,8 @@ class PropertyGraph {
    * @param reopen If true, reopens the graph after dumping (default: true)
    */
   void Dump(std::shared_ptr<Checkpoint> ckp, bool reopen = true);
+  void Dump(std::shared_ptr<Checkpoint> ckp, ModuleBroker& store,
+            CheckpointManifest& meta);
 
   /**
    * @brief Dump using the graph's own internal Checkpoint.
@@ -621,7 +626,7 @@ class PropertyGraph {
 
   std::shared_ptr<Checkpoint> ckp_;
   Schema schema_;
-  std::unique_ptr<IndexManager> index_manager_;
+  IndexManager* index_manager_;
   std::vector<std::shared_ptr<std::mutex>> v_mutex_;
   std::vector<VertexTable> vertex_tables_;
   std::unordered_map<uint32_t, EdgeTable> edge_tables_;

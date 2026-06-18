@@ -97,6 +97,8 @@ struct HNSWIndexQueryParams : IndexQueryParams {
  */
 class Index : public Module {
  public:
+  static constexpr const char* kIndexMetaKey = "index_meta";
+
   Index()
       : meta_(std::make_unique<IndexMeta>()),
         doc_id_map_(std::make_unique<DocIDMap>()) {}
@@ -152,7 +154,7 @@ class Index : public Module {
   /**
    * @brief Shallow copy: shared_ptr shares doc_id_map and raw index.
    */
-  virtual std::shared_ptr<Index> Fork() const = 0;
+  virtual std::unique_ptr<Index> Fork() const = 0;
 
   /**
    * @brief Write-time deep copy of DocIDMap when shared.

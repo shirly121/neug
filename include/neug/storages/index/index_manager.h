@@ -79,7 +79,7 @@ class IndexManager {
   /**
    * @brief Persist all indexes to a checkpoint manifest.
    */
-  void Dump(Checkpoint& ckp, CheckpointManifest& meta);
+  void Dump(Checkpoint& ckp, ModuleBroker& store, CheckpointManifest& meta);
 
   /**
    * @brief COW: Fork each Index (shallow copy).
@@ -92,7 +92,7 @@ class IndexManager {
   static std::string GetKey(const std::string& index_name);
 
  private:
-  std::unordered_map<std::string, std::shared_ptr<Index>> indexes_;
+  std::unordered_map<std::string, std::unique_ptr<Index>> indexes_;
 };
 
 }  // namespace neug

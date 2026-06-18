@@ -36,22 +36,7 @@ static MetricType ParseMetricType(const std::string& metric_str) {
 }
 
 HNSWIndex::HNSWIndex(std::string name, std::unique_ptr<neug::IndexMeta> meta)
-    : Index(std::move(name), std::move(meta)) {
-  // Extract HNSW params from meta_->options.
-  // zvec_index_ and doc_id_map_ are created later in Open().
-  auto it = meta_->options.find("dimension");
-  if (it != meta_->options.end())
-    dimension_ = std::stoi(it->second);
-  it = meta_->options.find("m");
-  if (it != meta_->options.end())
-    m_ = std::stoi(it->second);
-  it = meta_->options.find("ef_construction");
-  if (it != meta_->options.end())
-    ef_construction_ = std::stoi(it->second);
-  it = meta_->options.find("metric");
-  if (it != meta_->options.end())
-    metric_ = ParseMetricType(it->second);
-}
+    : Index(std::move(name), std::move(meta)) {}
 
 void HNSWIndex::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                      MemoryLevel level) {
@@ -194,8 +179,8 @@ Status HNSWIndex::Delete(vid_t vid) {
   return Status::OK();
 }
 
-std::shared_ptr<Index> HNSWIndex::Fork() const {
-  auto forked = std::make_shared<HNSWIndex>();
+std::unique_ptr<Index> HNSWIndex::Fork() const {
+  auto forked = std::make_unique<HNSWIndex>();
   forked->meta_ = std::make_unique<IndexMeta>(*meta_);
   if (doc_id_map_) {
     forked->doc_id_map_ = doc_id_map_->Clone();

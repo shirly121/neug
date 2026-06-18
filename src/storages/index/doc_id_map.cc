@@ -25,23 +25,28 @@ namespace neug {
 
 void DocIDMap::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                     MemoryLevel level) {
-  auto next_doc_id_str = descriptor.get("next_doc_id");
+  auto next_doc_id_str = descriptor.get(kNextDocIDKey);
   if (next_doc_id_str.has_value()) {
     next_doc_id_.store(
         static_cast<doc_id_t>(std::stoull(next_doc_id_str.value())),
         std::memory_order_relaxed);
   }
 
-  auto path = descriptor.get_path("doc_id_buffer").value_or("");
-  buffer_ = ckp.OpenFile(path, level);
+  auto path = descriptor.get_path(kDocIDBufferPathKey);
+  if (path.has_value() && !path->empty()) {
+    buffer_ = ckp.OpenFile(*path, level);
+  } else {
+    buffer_ = ckp.CreateRuntimeContainer(kDefaultCapacity * sizeof(vid_t),
+                                         level);
+  }
 }
 
 ModuleDescriptor DocIDMap::Dump(Checkpoint& ckp) {
   ModuleDescriptor desc;
   desc.module_type = "doc_id_map";
-  desc.set("next_doc_id",
+  desc.set(kNextDocIDKey,
            std::to_string(next_doc_id_.load(std::memory_order_relaxed)));
-  desc.set_path("doc_id_buffer", ckp.Commit(*buffer_));
+  desc.set_path(kDocIDBufferPathKey, ckp.Commit(*buffer_));
   return desc;
 }
 

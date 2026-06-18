@@ -31,6 +31,7 @@
 #include "neug/storages/allocators.h"
 #include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/graph/property_graph.h"
+#include "neug/storages/index/index_manager.h"
 #include "neug/transaction/compact_transaction.h"
 #include "neug/transaction/insert_transaction.h"
 #include "neug/transaction/read_transaction.h"
@@ -335,6 +336,7 @@ class NeugDB {
   std::mutex mutex_;
   std::vector<std::shared_ptr<Allocator>>
       allocators_;  // Allocators for each thread
+  std::unique_ptr<IndexManager> index_manager_;
 };
 
 }  // namespace neug

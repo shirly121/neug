@@ -18,6 +18,7 @@
 #include <glog/logging.h>
 
 #include "neug/storages/index/index_factory.h"
+#include "neug/storages/module/module_broker.h"
 
 namespace neug {
 
@@ -45,7 +46,7 @@ neug::result<Index*> IndexManager::CreateIndex(const std::string& name,
   index->SetMeta(std::move(meta_copy));
 
   auto* raw_ptr = index.get();
-  indexes_[name] = std::shared_ptr<Index>(index.release());
+  indexes_[name] = std::move(index);
   return raw_ptr;
 }
 
@@ -108,6 +109,7 @@ Status IndexManager::GetAllIndexes(std::vector<Index*>& target_indexes) {
 
 void IndexManager::Open(Checkpoint& ckp, ModuleBroker& store,
                         const CheckpointManifest& meta, MemoryLevel level) {
+  indexes_.clear();
   for (const auto& [key, desc] : meta.modules()) {
     if (!IsIndexModule(key)) {
       continue;
@@ -122,21 +124,23 @@ void IndexManager::Open(Checkpoint& ckp, ModuleBroker& store,
     auto index_name = index->GetMeta().name.empty()
                           ? key.substr(strlen(kIndexPrefix))
                           : index->GetMeta().name;
-    indexes_[index_name] = std::shared_ptr<Index>(index.release());
+    indexes_[index_name] = std::move(index);
     LOG(INFO) << "Opened index: " << index_name << " (type=" << desc.module_type
               << ")";
   }
 }
 
-void IndexManager::Dump(Checkpoint& ckp, CheckpointManifest& meta) {
+void IndexManager::Dump(Checkpoint& ckp, ModuleBroker& store,
+                        CheckpointManifest& meta) {
+  (void)ckp;
+  (void)meta;
   for (auto& [name, index] : indexes_) {
     if (!index)
       continue;
-
-    auto desc = index->Dump(ckp);
     std::string key = GetKey(index->GetMeta().name);
-    meta.set_module(key, std::move(desc));
+    store.SetModule(key, std::move(index));
   }
+  indexes_.clear();
 }
 
 bool IndexManager::IsIndexModule(const std::string& name) {
