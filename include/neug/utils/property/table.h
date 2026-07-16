@@ -45,6 +45,7 @@ class Table {
   void Init(Checkpoint& ckp, MemoryLevel level);
 
   void SetColumn(int idx, std::unique_ptr<ColumnBase> col);
+  std::unique_ptr<ColumnBase> TakeColumn(int idx);
 
   void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel memory_level, const std::vector<std::string>& col_name,

@@ -794,6 +794,25 @@ void PropertyGraph::Open(std::shared_ptr<Checkpoint> ckp,
   ckp_ = std::move(ckp);
 
   index_manager_->Open(ckp_, store, memory_level_);
+  auto indexes = index_manager_->GetAllIndexes();
+  if (!indexes) {
+    THROW_RUNTIME_ERROR("PropertyGraph::Open: failed to enumerate indexes: " +
+                        indexes.error().error_message());
+  }
+  for (auto* index : indexes.value()) {
+    const auto& index_meta = index->GetMeta();
+    if (index_meta.schema.label_id >= vertex_tables_.size()) {
+      THROW_RUNTIME_ERROR("PropertyGraph::Open: invalid index label id");
+    }
+    const auto* column =
+        vertex_tables_[index_meta.schema.label_id].GetPropertyColumnBase(
+            index_meta.schema.property_name);
+    auto status = index->Rebind(IndexBindContext{column});
+    if (!status.ok()) {
+      THROW_RUNTIME_ERROR("PropertyGraph::Open: failed to bind index '" +
+                          index_meta.name + "': " + status.error_message());
+    }
+  }
 }
 
 void PropertyGraph::compact_schema() {

@@ -67,7 +67,17 @@ class ArrayColumn : public ColumnBase {
 
   static std::string type_name() { return "column<array>"; }
 
+  template <typename T>
+  const void* get_row_ptr(size_t row) const {
+    const auto* column =
+        static_cast<const TypedColumn<T>*>(child_column_.get());
+    return column->data() + row * array_size_;
+  }
+
  private:
+  friend class VecColumn;
+  void setLogicalSize(size_t size) { size_ = size; }
+
   void openInternal(Checkpoint& ckp, const CheckpointManifest* manifest,
                     const ModuleDescriptor& desc, MemoryLevel level);
   ModuleDescriptor dumpSelfDescriptor() const;

@@ -24,6 +24,49 @@
 
 namespace neug {
 
+ColumnBase* VertexTable::UpgradeVecColumn(size_t col) {
+  auto* column = table_ ? table_->get_column_by_id(col) : nullptr;
+  if (!column) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("VertexTable::UpgradeVecColumn: column " +
+                                     std::to_string(col) + " out of range");
+  }
+  if (auto* vec = dynamic_cast<VecColumn*>(column))
+    return vec;
+  if (!dynamic_cast<ArrayColumn*>(column)) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("VertexTable::UpgradeVecColumn: column " +
+                                     std::to_string(col) +
+                                     " is not an ArrayColumn");
+  }
+  auto owned = table_->TakeColumn(static_cast<int>(col));
+  std::shared_ptr<ArrayColumn> buffer(
+      static_cast<ArrayColumn*>(owned.release()));
+  if (!ckp_) {
+    THROW_RUNTIME_ERROR(
+        "VertexTable::UpgradeVecColumn: table is not initialized");
+  }
+  auto accessor = std::make_unique<DefaultIndexIDAccessor>();
+  accessor->Open(*ckp_, ModuleDescriptor{}, memory_level_);
+  auto vec =
+      std::make_unique<VecColumn>(std::move(buffer), std::move(accessor));
+  auto* result = vec.get();
+  table_->SetColumn(static_cast<int>(col), std::move(vec));
+  return result;
+}
+
+ColumnBase* VertexTable::DegradeVecColumn(size_t col) {
+  auto* column = table_ ? table_->get_column_by_id(col) : nullptr;
+  if (!column) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("VertexTable::DegradeVecColumn: column " +
+                                     std::to_string(col) + " out of range");
+  }
+  auto* vec = dynamic_cast<VecColumn*>(column);
+  if (!vec)
+    return column;
+  auto buffer = vec->TakeBuffer();
+  table_->SetColumn(static_cast<int>(col), std::move(buffer));
+  return table_->get_column_by_id(col);
+}
+
 void VertexTable::Init(std::shared_ptr<Checkpoint> ckp, MemoryLevel level) {
   CHECK(vertex_schema_ != nullptr) << "VertexTable::Init requires schema";
   CHECK(indexer_ != nullptr) << "VertexTable::Init requires indexer slot";

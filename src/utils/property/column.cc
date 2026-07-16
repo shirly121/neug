@@ -14,6 +14,7 @@
  */
 
 #include "neug/utils/property/column.h"
+#include "neug/utils/property/vec_column.h"
 
 #include <limits>
 
@@ -88,6 +89,9 @@ std::unique_ptr<ColumnBase> CreateColumn(DataType type) {
 }
 
 std::shared_ptr<RefColumnBase> CreateRefColumn(const ColumnBase& column) {
+  if (auto* vec_column = dynamic_cast<const VecColumn*>(&column)) {
+    return std::make_shared<VecRefColumn>(*vec_column);
+  }
   auto type = column.type();
   switch (type) {
 #define TYPE_DISPATCHER(enum_val, type)            \

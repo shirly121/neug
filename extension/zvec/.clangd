@@ -1,0 +1,5 @@
+CompileFlags:
+  CompilationDatabase: ../../build
+  Add:
+    - -I/Users/zhouxiaoli/Downloads/neug/extension/zvec/include
+    - -I/Users/zhouxiaoli/Downloads/zvec/src/include

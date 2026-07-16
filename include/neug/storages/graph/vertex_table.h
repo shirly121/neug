@@ -22,6 +22,7 @@
 #include "neug/storages/module/module.h"
 #include "neug/utils/indexers.h"
 #include "neug/utils/property/table.h"
+#include "neug/utils/property/vec_column.h"
 
 namespace neug {
 
@@ -224,6 +225,15 @@ class VertexTable {
     return CreateRefColumn(*ptr);
   }
 
+  inline const ColumnBase* GetPropertyColumnBase(
+      const std::string& prop) const {
+    auto pk = vertex_schema_->primary_keys[0];
+    if (prop == std::get<1>(pk)) {
+      return &indexer_->get_keys();
+    }
+    return table_->get_column(prop);
+  }
+
   inline std::shared_ptr<RefColumnBase> GetPropertyColumn(
       int32_t col_id) const {
     auto ptr = table_->get_column_by_id(col_id);
@@ -265,6 +275,9 @@ class VertexTable {
 
   const Table& get_table() const { return *table_; }
   Table& get_table() { return *table_; }
+
+  ColumnBase* UpgradeVecColumn(size_t col);
+  ColumnBase* DegradeVecColumn(size_t col);
 
  private:
   vid_t insert_vertex_pk(const Value& id, timestamp_t ts, bool insert_safe);

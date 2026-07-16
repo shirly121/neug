@@ -462,7 +462,19 @@ Status StorageAPUpdateInterface::DeleteEdgeType(const std::string& src_type,
 
 neug::result<StorageIndex*> StorageAPUpdateInterface::CreateIndex(
     const std::string& name, std::unique_ptr<IndexMeta> meta) {
-  return index_manager_.CreateIndex(name, std::move(meta));
+  auto index = index_manager_.CreateIndex(name, std::move(meta));
+  if (!index) {
+    return tl::unexpected(index.error());
+  }
+  const auto& index_meta = index.value()->GetMeta();
+  const auto* column =
+      graph_.get_vertex_table(index_meta.schema.label_id)
+          .GetPropertyColumnBase(index_meta.schema.property_name);
+  auto status = index.value()->Rebind(IndexBindContext{column});
+  if (!status.ok()) {
+    RETURN_ERROR(status);
+  }
+  return index;
 }
 
 Status StorageAPUpdateInterface::DropIndex(const std::string& name) {
