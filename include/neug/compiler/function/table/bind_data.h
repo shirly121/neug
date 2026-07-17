@@ -112,6 +112,8 @@ struct NEUG_API IndexScanBindData final : TableFuncBindData {
         uniqueIndexName{std::move(uniqueIndexName)},
         targetValue{std::move(targetValue)} {}
 
+  ~IndexScanBindData() override;
+
   std::unique_ptr<TableFuncBindData> copy() const override {
     auto result = std::make_unique<IndexScanBindData>(columns, uniqueIndexName,
                                                       targetValue);

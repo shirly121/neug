@@ -76,7 +76,7 @@ set(_zvec_roaring_library
     "${_zvec_binary_dir}/external/usr/local/lib/libroaring.a")
 if(APPLE)
     execute_process(
-        COMMAND sysctl -n hw.ncpu
+        COMMAND sysctl -n hw.physicalcpu
         OUTPUT_VARIABLE _zvec_parallel_jobs
         OUTPUT_STRIP_TRAILING_WHITESPACE)
 else()
@@ -97,6 +97,22 @@ endif()
 # ZVec currently creates several common third-party targets unconditionally.
 # Build it in an isolated CMake project to avoid collisions with NeuG's gtest,
 # gflags, glog, protobuf, yaml-cpp, and utf8proc targets.
+set(_zvec_cmake_args
+    "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+    "-DBUILD_ZVEC_CORE_SHARED=ON"
+    "-DBUILD_ZVEC_SHARED=OFF"
+    "-DBUILD_ZVEC_AILEGO_SHARED=OFF"
+    "-DBUILD_PYTHON_BINDINGS=OFF"
+    "-DBUILD_C_BINDINGS=OFF"
+    "-DAUTO_DETECT_ARCH=OFF"
+    "-DBUILD_TOOLS=OFF")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    list(APPEND _zvec_cmake_args
+        "-DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}"
+        "-DCMAKE_SYSTEM_PROCESSOR=${CMAKE_OSX_ARCHITECTURES}")
+endif()
+
 ExternalProject_Add(zvec_external
     SOURCE_DIR "${ZVEC_SOURCE_DIR}"
     BINARY_DIR "${_zvec_binary_dir}"
@@ -105,15 +121,7 @@ ExternalProject_Add(zvec_external
         "${CMAKE_COMMAND}" --build <BINARY_DIR>
         --target zvec_core_shared roaring
         --parallel ${_zvec_parallel_jobs}
-      CMAKE_ARGS
-        "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
-        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-        "-DBUILD_ZVEC_CORE_SHARED=ON"
-        "-DBUILD_ZVEC_SHARED=OFF"
-        "-DBUILD_ZVEC_AILEGO_SHARED=OFF"
-        "-DBUILD_PYTHON_BINDINGS=OFF"
-        "-DBUILD_C_BINDINGS=OFF"
-        "-DBUILD_TOOLS=OFF")
+      CMAKE_ARGS ${_zvec_cmake_args})
 
 add_library(zvec_core_shared SHARED IMPORTED GLOBAL)
 set_target_properties(zvec_core_shared PROPERTIES
@@ -144,6 +152,11 @@ target_link_libraries(neug_zvec_extension PRIVATE
     zvec_roaring
     ${Protobuf_LIBRARIES})
 add_dependencies(neug_zvec_extension zvec_external)
+add_custom_command(TARGET neug_zvec_extension POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${_zvec_core_library}"
+        "$<TARGET_FILE_DIR:neug_zvec_extension>"
+    COMMENT "Copying ZVec core library next to the extension")
 
 add_extension_test(
     NAME zvec

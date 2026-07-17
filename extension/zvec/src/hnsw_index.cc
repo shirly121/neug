@@ -183,7 +183,7 @@ void HNSWIndex::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
   zvec::core_interface::HNSWIndexParam param(metric_, dimension_, m_,
                                              ef_construction_);
   param.data_type = ResolveDataType();
-  param.use_external_vector = true;
+  param.use_external_vector = false;
   zvec_index_ = zvec::core_interface::IndexFactory::CreateAndInitIndex(param);
   if (!zvec_index_) {
     THROW_RUNTIME_ERROR("[zvec] Failed to create HNSW index");

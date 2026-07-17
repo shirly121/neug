@@ -298,7 +298,6 @@ static Status updateVertexIndexData(
     if (detach_index) {
       RETURN_IF_NOT_OK(detach_index(*index));
     }
-    RETURN_IF_NOT_OK(index->Delete(lid));
     RETURN_IF_NOT_OK(index->Upsert(lid, value));
   }
   return Status::OK();

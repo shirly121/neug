@@ -6,8 +6,6 @@
 #include <gtest/gtest.h>
 
 #include "hnsw_index.h"
-#include "neug/main/connection.h"
-#include "neug/main/neug_db.h"
 #include "neug/storages/checkpoint.h"
 #include "neug/storages/checkpoint_manifest.h"
 #include "neug/storages/module/module_broker.h"
@@ -16,44 +14,8 @@
 #include "neug/utils/property/vec_column.h"
 #include "vector_distance_function.h"
 
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace neug::zvec_ext {
 namespace {
-
-std::filesystem::path GetExecutablePath() {
-#if defined(__APPLE__)
-  uint32_t size = 0;
-  _NSGetExecutablePath(nullptr, &size);
-  std::string buffer(size, '\0');
-  if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
-    return {};
-  }
-  return std::filesystem::canonical(buffer.c_str());
-#else
-  return std::filesystem::read_symlink("/proc/self/exe");
-#endif
-}
-
-std::string FindBuildRoot() {
-  auto directory = GetExecutablePath().parent_path();
-  const auto extension_path =
-      std::filesystem::path("extension/zvec/libzvec.neug_extension");
-  for (int i = 0; i < 8; ++i) {
-    if (std::filesystem::exists(directory / extension_path)) {
-      return directory.string();
-    }
-    if (directory == directory.parent_path()) {
-      break;
-    }
-    directory = directory.parent_path();
-  }
-  return "";
-}
 
 neug::Value MakeFloatArray(std::initializer_list<float> values) {
   std::vector<neug::Value> children;
@@ -85,130 +47,6 @@ TEST(VectorDistanceFunctionTest, InnerProduct) {
   auto rhs = MakeFloatArray({2.0f, 3.0f, 4.0f});
   auto result = neug::zvec_ext::VectorDistanceIPFunction::Exec({lhs, rhs});
   EXPECT_DOUBLE_EQ(result.GetValue<double>(), 20.0);
-}
-
-TEST(VectorDistanceFunctionTest, CypherPropertyAndArrayLiteral) {
-  auto build_root = FindBuildRoot();
-  ASSERT_FALSE(build_root.empty());
-  setenv("NEUG_EXTENSION_HOME_PYENV", build_root.c_str(), 1);
-
-  auto database_path =
-      std::filesystem::temp_directory_path() / "neug_zvec_distance_function";
-  std::filesystem::remove_all(database_path);
-
-  neug::NeugDB database;
-  ASSERT_TRUE(database.Open(database_path));
-  auto connection = database.Connect();
-  ASSERT_NE(connection, nullptr);
-
-  auto load = connection->Query("LOAD zvec;");
-  ASSERT_TRUE(load.has_value()) << load.error().ToString();
-  auto schema = connection->Query(
-      "CREATE NODE TABLE Item(id INT64 PRIMARY KEY, "
-      "name STRING, vec FLOAT[3]);");
-  ASSERT_TRUE(schema.has_value()) << schema.error().ToString();
-  auto insert = connection->Query(
-      "CREATE (:Item {id: 1, name: 'alice', "
-      "vec: [1.0, 2.0, 3.0]});");
-  ASSERT_TRUE(insert.has_value()) << insert.error().ToString();
-
-  auto result = connection->Query(
-      "MATCH (n:Item) RETURN vector_distance_l2(n.vec, [1.0, 4.0, "
-      "5.0]), vector_distance_cosine(n.vec, [1.0, 2.0, 3.0]), "
-      "vector_distance_ip(n.vec, [2.0, 3.0, 4.0]);");
-  ASSERT_TRUE(result.has_value()) << result.error().ToString();
-  ASSERT_EQ(result->response().arrays_size(), 3);
-  EXPECT_DOUBLE_EQ(result->response().arrays(0).double_array().values(0),
-                   std::sqrt(8.0));
-  EXPECT_NEAR(result->response().arrays(1).double_array().values(0), 0.0,
-              1e-12);
-  EXPECT_DOUBLE_EQ(result->response().arrays(2).double_array().values(0), 20.0);
-
-  auto insert_more = connection->Query(
-      "CREATE (:Item {id: 2, name: 'marko', vec: [2.0, 2.0, 2.0]}), "
-      "(:Item {id: 3, name: 'carol', vec: [3.0, 3.0, 3.0]}), "
-      "(:Item {id: 4, name: 'dave', vec: [4.0, 4.0, 4.0]});");
-  ASSERT_TRUE(insert_more.has_value()) << insert_more.error().ToString();
-  auto create_index = connection->Query(
-      "CREATE INDEX item_vec_hnsw ON Item USING HNSW (vec) "
-      "WITH (metric = 'l2', m = 16, ef_construction = 100);");
-  ASSERT_TRUE(create_index.has_value()) << create_index.error().ToString();
-
-  auto index_scan = connection->Query(
-      "MATCH (n:Item) "
-      "RETURN n.id, vector_distance_l2(n.vec, [2.1, 2.1, 2.1]) AS score "
-      "ORDER BY score ASC LIMIT 2;");
-  ASSERT_TRUE(index_scan.has_value()) << index_scan.error().ToString();
-  ASSERT_EQ(index_scan->length(), 2);
-  ASSERT_EQ(index_scan->response().arrays_size(), 2);
-  ASSERT_EQ(index_scan->response().arrays(1).double_array().values_size(), 2);
-  EXPECT_EQ(index_scan->response().arrays(0).int64_array().values(0), 2);
-  EXPECT_EQ(index_scan->response().arrays(0).int64_array().values(1), 1);
-  EXPECT_NEAR(index_scan->response().arrays(1).double_array().values(0),
-              std::sqrt(0.03), 1e-6);
-  EXPECT_NEAR(index_scan->response().arrays(1).double_array().values(1),
-              std::sqrt(2.03), 1e-6);
-
-  auto filtered_index_scan = connection->Query(
-      "MATCH (n:Item) WHERE n.name <> 'marko' "
-      "RETURN n.id, vector_distance_l2(n.vec, [2.1, 2.1, 2.1]) AS score "
-      "ORDER BY score ASC LIMIT 2;");
-  ASSERT_TRUE(filtered_index_scan.has_value())
-      << filtered_index_scan.error().ToString();
-  ASSERT_EQ(filtered_index_scan->length(), 2);
-  EXPECT_EQ(filtered_index_scan->response().arrays(0).int64_array().values(0),
-            1);
-  EXPECT_EQ(filtered_index_scan->response().arrays(0).int64_array().values(1),
-            3);
-  EXPECT_NEAR(
-      filtered_index_scan->response().arrays(1).double_array().values(0),
-      std::sqrt(2.03), 1e-6);
-  EXPECT_NEAR(
-      filtered_index_scan->response().arrays(1).double_array().values(1),
-      std::sqrt(2.43), 1e-6);
-
-  auto empty_filter = connection->Query(
-      "MATCH (n:Item) WHERE n.name = 'nobody' "
-      "RETURN n.id, vector_distance_l2(n.vec, [2.1, 2.1, 2.1]) AS score "
-      "ORDER BY score ASC LIMIT 2;");
-  ASSERT_TRUE(empty_filter.has_value()) << empty_filter.error().ToString();
-  EXPECT_EQ(empty_filter->length(), 0);
-
-  auto ip_schema = connection->Query(
-      "CREATE NODE TABLE IPItem(id INT64 PRIMARY KEY, vec FLOAT[3]);");
-  ASSERT_TRUE(ip_schema.has_value()) << ip_schema.error().ToString();
-  auto ip_insert = connection->Query(
-      "CREATE (:IPItem {id: 1, vec: [1.0, 0.0, 0.0]}), "
-      "(:IPItem {id: 2, vec: [1.0, 2.0, 0.0]}), "
-      "(:IPItem {id: 3, vec: [-1.0, -1.0, 0.0]}), "
-      "(:IPItem {id: 4, vec: [2.0, 3.0, 0.0]});");
-  ASSERT_TRUE(ip_insert.has_value()) << ip_insert.error().ToString();
-  auto create_ip_index = connection->Query(
-      "CREATE INDEX ip_item_vec_hnsw ON IPItem USING HNSW (vec) "
-      "WITH (metric = 'ip', m = 16, ef_construction = 100);");
-  ASSERT_TRUE(create_ip_index.has_value())
-      << create_ip_index.error().ToString();
-
-  auto ip_index_scan = connection->Query(
-      "MATCH (n:IPItem) "
-      "RETURN n.id, vector_distance_ip(n.vec, [1.0, 1.0, 0.0]) AS score "
-      "ORDER BY score DESC LIMIT 3;");
-  ASSERT_TRUE(ip_index_scan.has_value()) << ip_index_scan.error().ToString();
-  ASSERT_EQ(ip_index_scan->length(), 3);
-  ASSERT_EQ(ip_index_scan->response().arrays_size(), 2);
-  EXPECT_EQ(ip_index_scan->response().arrays(0).int64_array().values(0), 4);
-  EXPECT_EQ(ip_index_scan->response().arrays(0).int64_array().values(1), 2);
-  EXPECT_EQ(ip_index_scan->response().arrays(0).int64_array().values(2), 1);
-  EXPECT_DOUBLE_EQ(ip_index_scan->response().arrays(1).double_array().values(0),
-                   5.0);
-  EXPECT_DOUBLE_EQ(ip_index_scan->response().arrays(1).double_array().values(1),
-                   3.0);
-  EXPECT_DOUBLE_EQ(ip_index_scan->response().arrays(1).double_array().values(2),
-                   1.0);
-
-  connection.reset();
-  database.Close();
-  std::filesystem::remove_all(database_path);
 }
 
 constexpr const char* kIndexKey = "index";

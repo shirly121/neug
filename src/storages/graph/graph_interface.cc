@@ -158,7 +158,6 @@ static Status updateVertexIndexData(PropertyGraph& graph, label_t label,
     return indexes.error();
   }
   for (auto* index : indexes.value()) {
-    RETURN_IF_NOT_OK(index->Delete(lid));
     RETURN_IF_NOT_OK(index->Upsert(lid, value));
   }
   return Status::OK();
