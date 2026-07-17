@@ -137,5 +137,7 @@ add_extension_if_enabled("gds")
 add_extension_if_enabled("httpfs")
 # Add ZVec-backed vector indexes
 add_extension_if_enabled("zvec")
+# Add SQLite-backed full-text indexes
+add_extension_if_enabled("sqlite_fts")
 
 message(STATUS "=== Extension configuration complete ===")
