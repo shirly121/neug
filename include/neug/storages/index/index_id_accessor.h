@@ -88,4 +88,30 @@ class DefaultIndexIDAccessor final : public IndexIDAccessor {
   std::atomic<index_id_t> next_index_id_{0};
 };
 
+class VecIndexIDAccessor final : public IndexIDAccessor {
+ public:
+  explicit VecIndexIDAccessor(IndexIDAccessor* offset_accessor)
+      : offset_accessor_(offset_accessor) {}
+
+  void Rebind(IndexIDAccessor* offset_accessor) {
+    offset_accessor_ = offset_accessor;
+  }
+
+  index_id_t GetIndexIDByVID(vid_t vid) const override;
+  vid_t GetVIDByIndexID(index_id_t index_id) const override;
+  index_id_t UpsertVID(vid_t vid) override;
+  Status DeleteVID(vid_t vid) override;
+
+  void Open(Checkpoint&, const ModuleDescriptor&, MemoryLevel) override {}
+  void Dump(Checkpoint&, CheckpointManifest&, const std::string&) override {}
+  std::unique_ptr<Module> Clone() const override;
+  void Detach(Checkpoint&, MemoryLevel) override {}
+  std::string ModuleTypeName() const override {
+    return "vec_index_id_accessor";
+  }
+
+ private:
+  IndexIDAccessor* offset_accessor_;
+};
+
 }  // namespace neug

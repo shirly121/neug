@@ -228,6 +228,10 @@ class GPhysicalAnalyzer {
       }
       break;
     }
+    case planner::LogicalOperatorType::CREATE_INDEX: {
+      flag.schema = true;
+      break;
+    }
     case planner::LogicalOperatorType::ALTER:
     case planner::LogicalOperatorType::DROP: {
       flag.schema = true;

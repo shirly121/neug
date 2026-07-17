@@ -70,6 +70,10 @@ endif()
 include(ExternalProject)
 
 set(_zvec_binary_dir "${CMAKE_BINARY_DIR}/third_party/zvec-build")
+set(_zvec_roaring_include_dir
+    "${ZVEC_SOURCE_DIR}/thirdparty/CRoaring/CRoaring-2.0.4")
+set(_zvec_roaring_library
+    "${_zvec_binary_dir}/external/usr/local/lib/libroaring.a")
 if(APPLE)
     execute_process(
         COMMAND sysctl -n hw.ncpu
@@ -99,7 +103,7 @@ ExternalProject_Add(zvec_external
     INSTALL_COMMAND ""
     BUILD_COMMAND
         "${CMAKE_COMMAND}" --build <BINARY_DIR>
-        --target zvec_core_shared
+        --target zvec_core_shared roaring
         --parallel ${_zvec_parallel_jobs}
       CMAKE_ARGS
         "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
@@ -117,19 +121,32 @@ set_target_properties(zvec_core_shared PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${ZVEC_SOURCE_DIR}/src/include")
 add_dependencies(zvec_core_shared zvec_external)
 
+add_library(zvec_roaring STATIC IMPORTED GLOBAL)
+set_target_properties(zvec_roaring PROPERTIES
+    IMPORTED_LOCATION "${_zvec_roaring_library}"
+    INTERFACE_INCLUDE_DIRECTORIES "${_zvec_roaring_include_dir}")
+add_dependencies(zvec_roaring zvec_external)
+
 set(ZVEC_EXTENSION_OBJECT_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/hnsw_index.cc")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/hnsw_index.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/hnsw_index_scan.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/vector_distance_function.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/zvec_extension.cc")
 build_extension_lib("zvec")
 
 target_include_directories(neug_zvec_extension PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZVEC_SOURCE_DIR}/src/include)
-target_link_libraries(neug_zvec_extension PRIVATE neug zvec_core_shared)
+target_link_libraries(neug_zvec_extension PRIVATE
+    neug
+    zvec_core_shared
+    zvec_roaring
+    ${Protobuf_LIBRARIES})
 add_dependencies(neug_zvec_extension zvec_external)
 
 add_extension_test(
     NAME zvec
     TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hnsw_index_test.cc"
     EXTRA_INCLUDE_DIRS "${ZVEC_SOURCE_DIR}/src/include"
-    EXTRA_LINK_LIBS zvec_core_shared)
+    EXTRA_LINK_LIBS zvec_core_shared zvec_roaring)

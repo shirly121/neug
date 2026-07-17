@@ -53,6 +53,20 @@ ColumnBase* VertexTable::UpgradeVecColumn(size_t col) {
   return result;
 }
 
+ColumnBase* VertexTable::UpgradeVecColumn(const std::string& property_name) {
+  if (!table_) {
+    THROW_RUNTIME_ERROR(
+        "VertexTable::UpgradeVecColumn: table is not initialized");
+  }
+  auto col = table_->get_column_id_by_name(property_name);
+  if (col < 0) {
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "VertexTable::UpgradeVecColumn: property '" + property_name +
+        "' not found");
+  }
+  return UpgradeVecColumn(static_cast<size_t>(col));
+}
+
 ColumnBase* VertexTable::DegradeVecColumn(size_t col) {
   auto* column = table_ ? table_->get_column_by_id(col) : nullptr;
   if (!column) {

@@ -17,6 +17,7 @@ namespace neug::zvec_ext {
 
 struct HNSWIndexQueryParams final : IndexQueryParams {
   std::vector<vid_t> scalar_filter;
+  bool use_scalar_filter{false};
   Value target_value;
   uint32_t topk{10};
   bool fetch_vector{false};
@@ -42,32 +43,6 @@ class HNSWVecSource final : public zvec::core::VectorSource {
 
   const ArrayColumn* column_;
   VectorGetter vector_getter_;
-};
-
-class VecIndexIDAccessor final : public IndexIDAccessor {
- public:
-  explicit VecIndexIDAccessor(IndexIDAccessor* offset_accessor)
-      : offset_accessor_(offset_accessor) {}
-
-  index_id_t GetIndexIDByVID(vid_t vid) const override;
-  vid_t GetVIDByIndexID(index_id_t index_id) const override;
-  // VecColumn has already assigned the offset before the index is updated.
-  index_id_t UpsertVID(vid_t vid) override;
-  // Index deletion also invalidates the mapping owned by VecColumn.
-  Status DeleteVID(vid_t vid) override;
-
-  // VecColumn owns persistence and lifecycle management for the accessor.
-  void Open(Checkpoint&, const ModuleDescriptor&, MemoryLevel) override {}
-  void Dump(Checkpoint&, CheckpointManifest&, const std::string&) override {}
-
-  std::unique_ptr<Module> Clone() const override;
-  void Detach(Checkpoint&, MemoryLevel) override {}
-  std::string ModuleTypeName() const override {
-    return "vec_index_id_accessor";
-  }
-
- private:
-  IndexIDAccessor* offset_accessor_;
 };
 
 class ZVecDumpContainer final : public IDataContainer {

@@ -462,14 +462,30 @@ Status StorageAPUpdateInterface::DeleteEdgeType(const std::string& src_type,
 
 neug::result<StorageIndex*> StorageAPUpdateInterface::CreateIndex(
     const std::string& name, std::unique_ptr<IndexMeta> meta) {
-  auto index = index_manager_.CreateIndex(name, std::move(meta));
+  auto label_id = meta->schema.label_id;
+  const auto& property_name = meta->schema.property_name;
+  auto& vertex_table = graph_.get_vertex_table(label_id);
+  std::unique_ptr<IndexIDAccessor> index_id_accessor;
+  if (meta->schema.property_type.id() == DataTypeId::kArray) {
+    auto* column =
+        dynamic_cast<VecColumn*>(vertex_table.UpgradeVecColumn(property_name));
+    if (!column) {
+      RETURN_STATUS_ERROR(StatusCode::ERR_INTERNAL_ERROR,
+                          "Failed to upgrade property to VecColumn");
+    }
+    index_id_accessor =
+        std::make_unique<VecIndexIDAccessor>(column->get_offset_accessor());
+  } else {
+    index_id_accessor = std::make_unique<DefaultIndexIDAccessor>();
+  }
+  auto index = index_manager_.CreateIndex(name, std::move(meta),
+                                          std::move(index_id_accessor));
   if (!index) {
     return tl::unexpected(index.error());
   }
   const auto& index_meta = index.value()->GetMeta();
   const auto* column =
-      graph_.get_vertex_table(index_meta.schema.label_id)
-          .GetPropertyColumnBase(index_meta.schema.property_name);
+      vertex_table.GetPropertyColumnBase(index_meta.schema.property_name);
   auto status = index.value()->Rebind(IndexBindContext{column});
   if (!status.ok()) {
     RETURN_ERROR(status);

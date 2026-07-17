@@ -34,6 +34,7 @@ class Context;
 namespace function {
 struct CallFuncInputBase {
   virtual ~CallFuncInputBase() = default;
+  virtual void bindContext(execution::Context&&) {}
 };
 
 using call_bind_func_t = std::function<std::unique_ptr<CallFuncInputBase>(

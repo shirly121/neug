@@ -3,12 +3,12 @@
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
-#include <unordered_set>
 #include <utility>
 #include <variant>
 
 #include <glog/logging.h>
 #include <zvec/core/interface/index_factory.h>
+#include <roaring.hh>
 
 #include "neug/common/extra_type_info.h"
 #include "neug/storages/checkpoint.h"
@@ -103,32 +103,6 @@ HNSWVecSource::HNSWVecSource(const ArrayColumn* column, DataTypeId element_type)
 
 const void* HNSWVecSource::get_vector(uint32_t node_id) const {
   return vector_getter_(column_, node_id);
-}
-
-index_id_t VecIndexIDAccessor::GetIndexIDByVID(vid_t vid) const {
-  return offset_accessor_ ? offset_accessor_->GetIndexIDByVID(vid)
-                          : INVALID_INDEX_ID;
-}
-
-vid_t VecIndexIDAccessor::GetVIDByIndexID(index_id_t index_id) const {
-  return offset_accessor_ ? offset_accessor_->GetVIDByIndexID(index_id)
-                          : INVALID_VID;
-}
-
-index_id_t VecIndexIDAccessor::UpsertVID(vid_t vid) {
-  return GetIndexIDByVID(vid);
-}
-
-Status VecIndexIDAccessor::DeleteVID(vid_t vid) {
-  if (!offset_accessor_) {
-    return Status::InternalError(
-        "VecIndexIDAccessor is not bound to a VecColumn accessor");
-  }
-  return offset_accessor_->DeleteVID(vid);
-}
-
-std::unique_ptr<Module> VecIndexIDAccessor::Clone() const {
-  return std::make_unique<VecIndexIDAccessor>(offset_accessor_);
 }
 
 ZVecDumpContainer::ZVecDumpContainer(zvec::core_interface::Index* index,
@@ -289,7 +263,13 @@ Status HNSWIndex::Rebind(const IndexBindContext& context) {
                   "HNSWIndex requires a bound ArrayColumn buffer");
   }
   vec_source_ = std::make_unique<HNSWVecSource>(array_column, element_type);
-  index_id_accessor_ = std::make_unique<VecIndexIDAccessor>(offset_accessor);
+  auto* vec_accessor =
+      dynamic_cast<VecIndexIDAccessor*>(index_id_accessor_.get());
+  if (vec_accessor) {
+    vec_accessor->Rebind(offset_accessor);
+  } else {
+    index_id_accessor_ = std::make_unique<VecIndexIDAccessor>(offset_accessor);
+  }
   return Status::OK();
 }
 
@@ -332,17 +312,19 @@ result<std::vector<index_id_t>> HNSWIndex::SearchImpl(
   query_param->prefetch_offset = hnsw_params->prefetch_offset;
   query_param->prefetch_lines = hnsw_params->prefetch_lines;
 
-  if (!hnsw_params->scalar_filter.empty()) {
-    auto allowed = std::make_shared<std::unordered_set<index_id_t>>();
-    allowed->reserve(hnsw_params->scalar_filter.size());
+  if (hnsw_params->use_scalar_filter) {
+    auto allowed = std::make_shared<roaring::Roaring>();
     for (auto vid : hnsw_params->scalar_filter) {
       auto index_id = index_id_accessor_->GetIndexIDByVID(vid);
       if (index_id != INVALID_INDEX_ID)
-        allowed->insert(index_id);
+        allowed->add(index_id);
     }
+    allowed->runOptimize();
     query_param->filter = std::make_shared<zvec::core_interface::IndexFilter>();
-    query_param->filter->set(
-        [allowed](uint64_t key) { return !allowed->contains(key); });
+    query_param->filter->set([allowed](uint64_t key) {
+      return key > std::numeric_limits<uint32_t>::max() ||
+             !allowed->contains(static_cast<uint32_t>(key));
+    });
   }
 
   zvec::core_interface::VectorData query;

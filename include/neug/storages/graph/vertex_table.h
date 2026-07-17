@@ -277,6 +277,7 @@ class VertexTable {
   Table& get_table() { return *table_; }
 
   ColumnBase* UpgradeVecColumn(size_t col);
+  ColumnBase* UpgradeVecColumn(const std::string& property_name);
   ColumnBase* DegradeVecColumn(size_t col);
 
  private:
