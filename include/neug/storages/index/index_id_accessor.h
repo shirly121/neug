@@ -42,6 +42,8 @@ class IndexIDAccessor : public Module {
   virtual vid_t GetVIDByIndexID(index_id_t index_id) const = 0;
   virtual index_id_t UpsertVID(vid_t vid) = 0;
   virtual Status DeleteVID(vid_t vid) = 0;
+  virtual size_t size() const = 0;
+  virtual size_t capacity() const = 0;
 
   void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel level) override = 0;
@@ -53,13 +55,13 @@ class IndexIDAccessor : public Module {
 
 class DefaultIndexIDAccessor final : public IndexIDAccessor {
  public:
-  static constexpr size_t kDefaultCapacity = 1024;
-
   DefaultIndexIDAccessor() = default;
   ~DefaultIndexIDAccessor() override = default;
 
-  size_t size() const { return next_index_id_.load(std::memory_order_relaxed); }
-  size_t capacity() const {
+  size_t size() const override {
+    return next_index_id_.load(std::memory_order_relaxed);
+  }
+  size_t capacity() const override {
     return index_id_to_vid_ ? index_id_to_vid_->GetDataSize() / sizeof(vid_t)
                             : 0;
   }
@@ -101,6 +103,12 @@ class VecIndexIDAccessor final : public IndexIDAccessor {
   vid_t GetVIDByIndexID(index_id_t index_id) const override;
   index_id_t UpsertVID(vid_t vid) override;
   Status DeleteVID(vid_t vid) override;
+  size_t size() const override {
+    return offset_accessor_ ? offset_accessor_->size() : 0;
+  }
+  size_t capacity() const override {
+    return offset_accessor_ ? offset_accessor_->capacity() : 0;
+  }
 
   void Open(Checkpoint&, const ModuleDescriptor&, MemoryLevel) override {}
   void Dump(Checkpoint&, CheckpointManifest&, const std::string&) override {}

@@ -403,12 +403,13 @@ TEST(VecColumnTest, AccessUpdateAndDumpOpen) {
 
   auto accessor = std::make_unique<DefaultIndexIDAccessor>();
   accessor->Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
-  VecColumn column(buffer, std::move(accessor));
+  VecColumn column(buffer, std::move(accessor), 2);
   EXPECT_EQ(column.size(), 2);
   EXPECT_EQ(column.get_offset(0), 0);
   EXPECT_FLOAT_EQ(
       ArrayValue::GetChildren(column.get_any(1))[0].GetValue<float>(), 3);
 
+  column.resize(3);
   column.set_any(0, array(5, 6), true);
   EXPECT_EQ(column.get_offset(0), 2);
   EXPECT_FLOAT_EQ(
@@ -425,9 +426,6 @@ TEST(VecColumnTest, AccessUpdateAndDumpOpen) {
   EXPECT_FLOAT_EQ(
       ArrayValue::GetChildren(reopened.get_any(0))[0].GetValue<float>(), 5);
 
-  auto degraded = reopened.TakeBuffer();
-  ASSERT_NE(degraded, nullptr);
-  EXPECT_EQ(degraded->size(), 2);
   std::filesystem::remove_all(temp_dir);
 }
 

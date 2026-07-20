@@ -11,13 +11,13 @@ class VecColumn : public ColumnBase {
  public:
   VecColumn();
   VecColumn(std::shared_ptr<ArrayColumn> buffer,
-            std::unique_ptr<IndexIDAccessor> accessor);
+            std::unique_ptr<IndexIDAccessor> accessor, size_t vid_size);
 
   void Open(Checkpoint&, const ModuleDescriptor&, MemoryLevel) override;
   void Open(Checkpoint&, const CheckpointManifest&, const ModuleDescriptor&,
             MemoryLevel) override;
   void Dump(Checkpoint&, CheckpointManifest&, const std::string&) override;
-  size_t size() const override { return vid_size_; }
+  size_t size() const override { return buffer_->size(); }
   void resize(size_t size) override;
   void resize(size_t size, const Value& default_value) override;
   DataTypeId type() const override { return DataTypeId::kArray; }
@@ -31,21 +31,18 @@ class VecColumn : public ColumnBase {
     return offset_accessor_.get();
   }
   const ArrayColumn* get_buffer() const { return buffer_.get(); }
-  std::unique_ptr<ArrayColumn> TakeBuffer();
   std::unique_ptr<Module> Clone() const override;
   void Detach(Checkpoint&, MemoryLevel) override;
   std::string ModuleTypeName() const override { return type_name(); }
   static std::string type_name() { return "column<vector>"; }
 
  private:
-  static size_t EstimateOffsetCapacity(size_t vid_size);
   void openInternal(Checkpoint&, const CheckpointManifest*,
                     const ModuleDescriptor&, MemoryLevel);
   void checkOffset(index_id_t offset, const char* operation) const;
 
   std::unique_ptr<IndexIDAccessor> offset_accessor_;
   std::shared_ptr<ArrayColumn> buffer_;
-  size_t vid_size_{0};
 };
 
 class VecRefColumn : public RefColumnBase {

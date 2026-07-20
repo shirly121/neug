@@ -278,7 +278,6 @@ class VertexTable {
 
   ColumnBase* UpgradeVecColumn(size_t col);
   ColumnBase* UpgradeVecColumn(const std::string& property_name);
-  ColumnBase* DegradeVecColumn(size_t col);
 
  private:
   vid_t insert_vertex_pk(const Value& id, timestamp_t ts, bool insert_safe);

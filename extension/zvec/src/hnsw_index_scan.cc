@@ -8,6 +8,7 @@
 #include "hnsw_index.h"
 #include "neug/common/columns/vertex_columns.h"
 #include "neug/compiler/binder/expression/literal_expression.h"
+#include "neug/compiler/binder/expression/node_expression.h"
 #include "neug/compiler/binder/expression/property_expression.h"
 #include "neug/compiler/binder/expression/scalar_function_expression.h"
 #include "neug/compiler/catalog/catalog_entry/function_catalog_entry.h"
@@ -106,13 +107,46 @@ bool ContainsPrimaryKeyPredicate(
 }
 
 std::shared_ptr<binder::Expression> MakeScanColumn(
-    const planner::LogicalScanNodeTable& scan) {
-  auto node_id = scan.getNodeID();
-  const auto& property = node_id->constCast<binder::PropertyExpression>();
-  auto output = std::shared_ptr<binder::Expression>(node_id->copy());
+    const binder::PropertyExpression& property) {
+  auto output = std::shared_ptr<binder::Expression>(property.copy());
   output->setUniqueName(property.getVariableName());
   output->setAlias(property.getRawVariableName());
   return output;
+}
+
+const binder::PropertyExpression* GetVertexOnlyOutput(
+    const planner::LogicalOperator& input,
+    const binder::PropertyExpression& distance_property) {
+  const auto* schema = input.getSchema();
+  if (schema == nullptr) {
+    return nullptr;
+  }
+  const binder::PropertyExpression* vertex = nullptr;
+  for (const auto& expression : schema->getExpressionsInScope()) {
+    const binder::PropertyExpression* property = nullptr;
+    if (expression->expressionType == common::ExpressionType::PATTERN) {
+      const auto* node = expression->constPtrCast<binder::NodeExpression>();
+      if (node == nullptr || node->getTableIDs().size() != 1 ||
+          node->getTableIDs()[0] != distance_property.getSingleTableID()) {
+        return nullptr;
+      }
+      property =
+          node->getInternalIDRef()->constPtrCast<binder::PropertyExpression>();
+    } else if (expression->expressionType == common::ExpressionType::PROPERTY) {
+      property = expression->constPtrCast<binder::PropertyExpression>();
+    } else {
+      return nullptr;
+    }
+    if (property == nullptr || !property->isInternalID() ||
+        !property->isSingleLabel() ||
+        property->getSingleTableID() != distance_property.getSingleTableID()) {
+      return nullptr;
+    }
+    if (property->getVariableName() == distance_property.getVariableName()) {
+      vertex = property;
+    }
+  }
+  return vertex;
 }
 
 Value ParseScalarValue(const ::common::Value& value) {
@@ -284,23 +318,10 @@ HNSWIndexScanOptimizer::visitOrderByReplace(
     return op;
   }
   auto projection = child->ptrCast<planner::LogicalProjection>();
-  if (projection->getNumChildren() != 1 ||
-      projection->getChild(0)->getOperatorType() !=
-          planner::LogicalOperatorType::SCAN_NODE_TABLE) {
+  if (projection->getNumChildren() != 1) {
     return op;
   }
-  auto scan_op = projection->getChild(0);
-  auto scan = scan_op->ptrCast<planner::LogicalScanNodeTable>();
-  if (scan->getTableIDs().size() != 1 ||
-      scan->getScanType() != planner::LogicalScanNodeTableType::SCAN) {
-    return op;
-  }
-  if (ContainsPrimaryKeyPredicate(scan->getPredicates(),
-                                  scan->getTableIDs()[0])) {
-    return op;
-  }
-  const bool has_filter = scan->getPredicates() != nullptr ||
-                          !scan->getPropertyPredicates().empty();
+  auto input_op = projection->getChild(0);
 
   auto distance = FindDistanceExpression(*order_by, *projection);
   if (distance == nullptr) {
@@ -309,26 +330,48 @@ HNSWIndexScanOptimizer::visitOrderByReplace(
   const binder::PropertyExpression* property = nullptr;
   std::shared_ptr<binder::Expression> target;
   if (!ExtractDistanceArguments(*distance, property, target) ||
-      property->getVariableName() != scan->getAliasName() ||
-      property->getSingleTableID() != scan->getTableIDs()[0]) {
+      !property->isSingleLabel()) {
     return op;
+  }
+
+  const binder::PropertyExpression* vertex_output = nullptr;
+  bool attach_input = true;
+  if (input_op->getOperatorType() ==
+      planner::LogicalOperatorType::SCAN_NODE_TABLE) {
+    auto scan = input_op->ptrCast<planner::LogicalScanNodeTable>();
+    if (scan->getTableIDs().size() != 1 ||
+        scan->getScanType() != planner::LogicalScanNodeTableType::SCAN ||
+        ContainsPrimaryKeyPredicate(scan->getPredicates(),
+                                    scan->getTableIDs()[0]) ||
+        property->getVariableName() != scan->getAliasName() ||
+        property->getSingleTableID() != scan->getTableIDs()[0]) {
+      return op;
+    }
+    vertex_output = &scan->getNodeID()->constCast<binder::PropertyExpression>();
+    attach_input = scan->getPredicates() != nullptr ||
+                   !scan->getPropertyPredicates().empty();
+  } else {
+    vertex_output = GetVertexOnlyOutput(*input_op, *property);
+    if (vertex_output == nullptr) {
+      return op;
+    }
   }
 
   auto* function = GetIndexScanFunction(*context_->getCatalog());
   if (function == nullptr) {
     return op;
   }
-  binder::expression_vector columns{MakeScanColumn(*scan)};
+  binder::expression_vector columns{MakeScanColumn(*vertex_output)};
   auto bind_data =
       std::make_unique<function::IndexScanBindData>(columns, "", target);
-  bind_data->options["label_id"] = std::to_string(scan->getTableIDs()[0]);
+  bind_data->options["label_id"] = std::to_string(property->getSingleTableID());
   bind_data->options["property_name"] = property->getPropertyName();
   bind_data->options["topk"] = std::to_string(order_by->getLimitNum());
 
   auto table_call = std::make_shared<planner::LogicalTableFunctionCall>(
       *function, std::move(bind_data));
-  if (has_filter) {
-    table_call->addChild(std::move(scan_op));
+  if (attach_input) {
+    table_call->addChild(std::move(input_op));
   }
   table_call->computeFlatSchema();
   projection->setChild(0, std::move(table_call));

@@ -79,6 +79,7 @@ def _create_advanced_data(conn):
         f"cosine_vec FLOAT[{DIMENSION}], "
         f"ip_vec FLOAT[{DIMENSION}]);"
     )
+    conn.execute("CREATE REL TABLE NEXT(FROM Item TO Item);")
     for start in range(0, NUM_VECTORS, 100):
         nodes = []
         for index in range(start, min(start + 100, NUM_VECTORS)):
@@ -91,6 +92,18 @@ def _create_advanced_data(conn):
                 "})"
             )
         conn.execute("CREATE " + ",".join(nodes) + ";")
+
+    for start in range(0, NUM_VECTORS - 1, 100):
+        matches = []
+        edges = []
+        for index in range(start, min(start + 100, NUM_VECTORS - 1)):
+            suffix = index - start
+            matches.append(
+                f"(source{suffix}:Item {{id: {index}}}),"
+                f"(target{suffix}:Item {{id: {index + 1}}})"
+            )
+            edges.append(f"(source{suffix})-[:NEXT]->(target{suffix})")
+        conn.execute("MATCH " + ",".join(matches) + " CREATE " + ",".join(edges) + ";")
 
     conn.execute(
         "CREATE INDEX item_l2_hnsw ON Item USING HNSW (l2_vec) "
@@ -173,6 +186,19 @@ def test_inner_product_index_scan(advanced_connection):
     assert [row[1] for row in rows] == pytest.approx(
         [999 * DIMENSION, 998 * DIMENSION, 997 * DIMENSION]
     )
+
+
+def test_graph_query_then_l2_index_scan(advanced_connection):
+    rows = list(
+        advanced_connection.execute(
+            "MATCH (source:Item)-[:NEXT]->(n:Item) "
+            "RETURN n.id, "
+            f"vector_distance_l2(n.l2_vec, {_array_literal(_constant_vector(500.1))}) "
+            "AS score ORDER BY score ASC LIMIT 3;"
+        )
+    )
+    assert rows[0][0] == 500
+    assert {row[0] for row in rows[1:3]} == {499, 501}
 
 
 def test_update_data_then_index_scan(advanced_connection):

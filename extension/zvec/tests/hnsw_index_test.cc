@@ -86,7 +86,7 @@ std::unique_ptr<VecColumn> MakeVecColumn(Checkpoint& checkpoint, int dimension,
   auto accessor = std::make_unique<DefaultIndexIDAccessor>();
   accessor->Open(checkpoint, ModuleDescriptor{}, MemoryLevel::kInMemory);
   auto column =
-      std::make_unique<VecColumn>(std::move(buffer), std::move(accessor));
+      std::make_unique<VecColumn>(std::move(buffer), std::move(accessor), 0);
   column->resize(size);
   return column;
 }

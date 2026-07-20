@@ -472,6 +472,7 @@ neug::result<StorageIndex*> StorageAPUpdateInterface::CreateIndex(
       RETURN_STATUS_ERROR(StatusCode::ERR_INTERNAL_ERROR,
                           "Failed to upgrade property to VecColumn");
     }
+    mut_view_.Rebuild(graph_);
     index_id_accessor =
         std::make_unique<VecIndexIDAccessor>(column->get_offset_accessor());
   } else {
