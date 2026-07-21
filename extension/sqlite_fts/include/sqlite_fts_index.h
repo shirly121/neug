@@ -55,6 +55,9 @@ class SQLiteFTSIndex final : public StorageIndex {
   void Detach(Checkpoint& ckp, MemoryLevel level) override;
   std::unique_ptr<Module> Clone() const override;
 
+  Status BeginBuild() override;
+  Status FinishBuild() override;
+
   result<std::vector<SQLiteFTSRankedResult>> RankedSearch(
       const SQLiteFTSQueryParams& params);
   static bool HasFTS5() { return SQLiteDatabase::HasFTS5(); }

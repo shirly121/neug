@@ -101,6 +101,15 @@ class StorageIndex : public Module {
   // --- Data operations ---
 
   /**
+   * @brief Prepare the index for a bulk build.
+   *
+   * Index implementations may override these hooks to optimize a sequence of
+   * Upsert calls. The default implementation preserves the existing behavior.
+   */
+  virtual Status BeginBuild() { return Status::OK(); }
+  virtual Status FinishBuild() { return Status::OK(); }
+
+  /**
    * @brief Search the index and translate internal index ids to vertex ids.
    * @param params Query parameters (subclass-specific).
    * @return Vertex ids corresponding to valid internal index ids.

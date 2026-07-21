@@ -58,12 +58,20 @@ class CreateIndexOpr : public IOperator {
       auto col = update_interface->GetVertexPropColumn(label_id, prop_name);
       if (col) {
         auto vertices = update_interface->GetVertexSet(label_id);
+        auto status = index->BeginBuild();
+        if (!status.ok()) {
+          return tl::unexpected(status);
+        }
         for (vid_t vid : vertices) {
           auto value = col->get_any(vid);
-          auto status = index->Upsert(vid, value);
+          status = index->Upsert(vid, value);
           if (!status.ok()) {
             return tl::unexpected(status);
           }
+        }
+        status = index->FinishBuild();
+        if (!status.ok()) {
+          return tl::unexpected(status);
         }
       }
     }
