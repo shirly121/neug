@@ -53,18 +53,29 @@ class CreateIndexOpr : public IOperator {
     GS_AUTO(index,
             update_interface->CreateIndex(index_name, std::move(index_meta)));
 
-    if (!meta_->schema.property_name.empty()) {
-      const auto& prop_name = meta_->schema.property_name;
-      auto col = update_interface->GetVertexPropColumn(label_id, prop_name);
-      if (col) {
-        auto vertices = update_interface->GetVertexSet(label_id);
-        for (vid_t vid : vertices) {
-          auto value = col->get_any(vid);
-          auto status = index->Upsert(vid, value);
-          if (!status.ok()) {
-            return tl::unexpected(status);
-          }
-        }
+    const auto property_names = meta_->schema.GetPropertyNames();
+    std::vector<std::shared_ptr<RefColumnBase>> columns;
+    columns.reserve(property_names.size());
+    for (const auto& property_name : property_names) {
+      auto column =
+          update_interface->GetVertexPropColumn(label_id, property_name);
+      if (!column) {
+        RETURN_STATUS_ERROR(
+            StatusCode::ERR_SCHEMA_MISMATCH,
+            "Indexed property column not found: " + property_name);
+      }
+      columns.push_back(column);
+    }
+    auto vertices = update_interface->GetVertexSet(label_id);
+    for (vid_t vid : vertices) {
+      std::vector<Value> values;
+      values.reserve(columns.size());
+      for (const auto& column : columns) {
+        values.push_back(column->get_any(vid));
+      }
+      auto status = index->Upsert(vid, values);
+      if (!status.ok()) {
+        return tl::unexpected(status);
       }
     }
 
@@ -104,11 +115,17 @@ neug::result<OpBuildResultT> CreateIndexOprBuilder::Build(
   index_meta->type = create_index.create_index_type();
 
   for (const auto& prop : create_index.properties()) {
-    index_meta->schema.property_name = prop;
+    index_meta->schema.property_names.push_back(prop);
   }
 
   for (const auto& pt : create_index.property_types()) {
-    index_meta->schema.property_type = parse_from_data_type(pt);
+    index_meta->schema.property_types.push_back(parse_from_data_type(pt));
+  }
+  if (!index_meta->schema.property_names.empty()) {
+    index_meta->schema.property_name = index_meta->schema.property_names[0];
+  }
+  if (!index_meta->schema.property_types.empty()) {
+    index_meta->schema.property_type = index_meta->schema.property_types[0];
   }
 
   for (const auto& [key, value] : create_index.options()) {

@@ -114,6 +114,7 @@ def ontology_graph(tmp_path_factory):
     db = Database(db_path=str(db_path), mode="w")
     conn = db.connect()
     conn.execute("LOAD zvec;")
+    conn.execute("LOAD sqlite_fts;")
     conn.execute(
         "CREATE NODE TABLE Entity("
         "uid STRING PRIMARY KEY, name STRING, description STRING, "
@@ -162,6 +163,15 @@ def ontology_graph(tmp_path_factory):
     conn.execute(
         "CREATE INDEX entity_embedding_hnsw ON Entity USING HNSW (embedding) "
         "WITH (metric = 'ip', m = 16, ef_construction = 200);"
+    )
+    conn.execute(
+        "CREATE INDEX entity_description_fts "
+        "ON Entity USING SQLITE_FTS (description);"
+    )
+    conn.execute(
+        "CREATE INDEX entity_text_fts "
+        "ON Entity USING SQLITE_FTS (name, description) "
+        "WITH (name_weight = 8.0, description_weight = 2.0);"
     )
 
     yield {
@@ -303,3 +313,129 @@ def test_updated_vector_is_searchable(ontology_graph):
         f"updated vector score={stored_score}, returned top-1={rows[0][0]} "
         f"with score={rows[0][2]}"
     )
+
+
+def _assert_fts_result(rows, score_column):
+    assert rows
+    assert len(rows) <= TOPK
+    scores = [row[score_column] for row in rows]
+    assert scores == sorted(scores)
+
+
+def test_single_column_full_text_search(ontology_graph):
+    rows = list(
+        ontology_graph["connection"].execute(
+            "MATCH (n:Entity) "
+            "RETURN n.uid, n.name, n.description, n.entity_type, n.product, "
+            "n.authority, "
+            "sqlite_fts_bm25(n.description, 'MaxCompute') AS score "
+            f"ORDER BY score ASC LIMIT {TOPK};"
+        )
+    )
+
+    _assert_fts_result(rows, 6)
+
+
+def test_multi_column_full_text_search(ontology_graph):
+    rows = list(
+        ontology_graph["connection"].execute(
+            "MATCH (n:Entity) "
+            "RETURN n.uid, n.name, n.description, n.entity_type, n.product, "
+            "n.authority, "
+            "sqlite_fts_bm25([n.name, n.description], 'MaxCompute') AS score "
+            f"ORDER BY score ASC LIMIT {TOPK};"
+        )
+    )
+
+    _assert_fts_result(rows, 6)
+
+
+@pytest.mark.parametrize(
+    "query_string",
+    [
+        '"Flink Connector"',
+        "Flink AND MaxCompute",
+        "(Flink OR Connector) AND MaxCompute",
+        "vect*",
+        "Flink* AND MaxCompute",
+    ],
+)
+def test_full_text_query_syntax(ontology_graph, query_string):
+    rows = list(
+        ontology_graph["connection"].execute(
+            "MATCH (n:Entity) "
+            "RETURN n.uid, n.name, n.description, "
+            "sqlite_fts_bm25(n.description, "
+            f"{_string_literal(query_string)}) AS score "
+            f"ORDER BY score ASC LIMIT {TOPK};"
+        )
+    )
+
+    _assert_fts_result(rows, 3)
+
+
+def test_full_text_search_then_graph_query(ontology_graph):
+    rows = list(
+        ontology_graph["connection"].execute(
+            "MATCH (n:Entity) "
+            "WITH n, sqlite_fts_bm25(n.description, "
+            "'MaxCompute') AS score "
+            f"ORDER BY score ASC LIMIT {TOPK} "
+            "MATCH (n)-[r:rel_ep]->(p:Product) "
+            "RETURN n.uid, n.name, score, p.name AS related_product, "
+            "r.rel_type, r.content ORDER BY score ASC;"
+        )
+    )
+
+    assert rows
+    assert len({row[0] for row in rows}) <= TOPK
+    scores = [row[2] for row in rows]
+    assert scores == sorted(scores)
+
+
+def test_scalar_filter_then_full_text_search(ontology_graph):
+    rows = list(
+        ontology_graph["connection"].execute(
+            "MATCH (n:Entity) "
+            "WHERE n.product = 'Flink' AND n.authority >= 2 "
+            "RETURN n.uid, n.name, n.description, n.authority, "
+            "sqlite_fts_bm25(n.description, 'MaxCompute') AS score "
+            f"ORDER BY score ASC LIMIT {TOPK};"
+        )
+    )
+
+    _assert_fts_result(rows, 4)
+    assert all(row[3] >= 2 for row in rows)
+
+
+def test_graph_query_then_full_text_search(ontology_graph):
+    rows = list(
+        ontology_graph["connection"].execute(
+            "MATCH (n:Entity)-[r:rel_ep]->(p:Product {name: 'MaxCompute'}) "
+            "RETURN n.uid, n.name, n.description, r.rel_type, r.content, "
+            "sqlite_fts_bm25(n.description, 'Flink') AS score "
+            f"ORDER BY score ASC LIMIT {TOPK};"
+        )
+    )
+
+    _assert_fts_result(rows, 5)
+
+
+def test_full_text_and_vector_search(ontology_graph):
+    rows = list(
+        ontology_graph["connection"].execute(
+            "MATCH (n:Entity) "
+            "WITH n, sqlite_fts_bm25(n.description, "
+            "'MaxCompute') AS text_score "
+            "ORDER BY text_score ASC LIMIT 200 "
+            "RETURN n.uid, n.name, n.description, text_score, "
+            "vector_distance_ip(n.embedding, "
+            f"{ontology_graph['query_literal']}) AS vector_score "
+            f"ORDER BY vector_score DESC LIMIT {TOPK};"
+        )
+    )
+
+    assert rows
+    assert len(rows) <= TOPK
+    vector_scores = [row[4] for row in rows]
+    assert vector_scores == sorted(vector_scores, reverse=True)

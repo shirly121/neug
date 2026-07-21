@@ -64,11 +64,15 @@ result<std::vector<vid_t>> StorageIndex::Search(
 }
 
 Status StorageIndex::Upsert(vid_t vid, const Value& new_value) {
+  return Upsert(vid, std::vector<Value>{new_value});
+}
+
+Status StorageIndex::Upsert(vid_t vid, const std::vector<Value>& new_values) {
   if (!index_id_accessor_) {
     return Status::InternalError("Index ID accessor is not initialized");
   }
   auto index_id = index_id_accessor_->UpsertVID(vid);
-  return AppendImpl(index_id, new_value);
+  return AppendImpl(index_id, new_values);
 }
 
 Status StorageIndex::Delete(vid_t vid) {
@@ -102,6 +106,18 @@ rapidjson::Value IndexBindSchema::ToJson(
           static_cast<rapidjson::SizeType>(property_type_yaml.size()), alloc),
       alloc);
 
+  rapidjson::Value names(rapidjson::kArrayType);
+  for (const auto& name : GetPropertyNames()) {
+    names.PushBack(rapidjson::Value(name.c_str(), name.size(), alloc), alloc);
+  }
+  obj.AddMember("property_names", std::move(names), alloc);
+  rapidjson::Value types(rapidjson::kArrayType);
+  for (const auto& type : GetPropertyTypes()) {
+    auto yaml = YAML::Dump(YAML::convert<DataType>::encode(type));
+    types.PushBack(rapidjson::Value(yaml.c_str(), yaml.size(), alloc), alloc);
+  }
+  obj.AddMember("property_types", std::move(types), alloc);
+
   return obj;
 }
 
@@ -113,6 +129,13 @@ IndexBindSchema IndexBindSchema::FromJson(const rapidjson::Value& obj) {
   if (obj.HasMember("property_name") && obj["property_name"].IsString()) {
     schema.property_name = obj["property_name"].GetString();
   }
+  if (obj.HasMember("property_names") && obj["property_names"].IsArray()) {
+    for (const auto& name : obj["property_names"].GetArray()) {
+      if (name.IsString()) {
+        schema.property_names.emplace_back(name.GetString());
+      }
+    }
+  }
   if (obj.HasMember("property_type_detail") &&
       obj["property_type_detail"].IsString()) {
     auto node = YAML::Load(obj["property_type_detail"].GetString());
@@ -123,6 +146,27 @@ IndexBindSchema IndexBindSchema::FromJson(const rapidjson::Value& obj) {
   } else if (obj.HasMember("property_type") && obj["property_type"].IsUint()) {
     schema.property_type =
         DataType(static_cast<DataTypeId>(obj["property_type"].GetUint()));
+  }
+  if (obj.HasMember("property_types") && obj["property_types"].IsArray()) {
+    for (const auto& encoded : obj["property_types"].GetArray()) {
+      if (!encoded.IsString()) {
+        continue;
+      }
+      DataType type;
+      auto node = YAML::Load(encoded.GetString());
+      if (!YAML::convert<DataType>::decode(node, type)) {
+        THROW_RUNTIME_ERROR(
+            "IndexBindSchema::FromJson: invalid property_types entry");
+      }
+      schema.property_types.push_back(std::move(type));
+    }
+  }
+  if (schema.property_names.empty() && !schema.property_name.empty()) {
+    schema.property_names.push_back(schema.property_name);
+  }
+  if (schema.property_types.empty() &&
+      schema.property_type.id() != DataTypeId::kUnknown) {
+    schema.property_types.push_back(schema.property_type);
   }
   return schema;
 }

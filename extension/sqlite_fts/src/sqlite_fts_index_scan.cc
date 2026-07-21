@@ -61,19 +61,69 @@ const binder::ScalarFunctionExpression* FindBM25Expression(
   return nullptr;
 }
 
-bool ExtractBM25Arguments(const binder::ScalarFunctionExpression& expression,
-                          const binder::PropertyExpression*& property,
-                          std::shared_ptr<binder::LiteralExpression>& query) {
+bool ExtractBM25Arguments(
+    const binder::ScalarFunctionExpression& expression,
+    std::vector<const binder::PropertyExpression*>& properties,
+    std::shared_ptr<binder::LiteralExpression>& query) {
   auto children = expression.getChildren();
   if (children.size() != 2 ||
-      children[0]->expressionType != common::ExpressionType::PROPERTY ||
       children[1]->expressionType != common::ExpressionType::LITERAL) {
     return false;
   }
-  property = children[0]->ptrCast<binder::PropertyExpression>();
+  if (children[0]->expressionType == common::ExpressionType::PROPERTY) {
+    properties.push_back(children[0]->ptrCast<binder::PropertyExpression>());
+  } else if (children[0]->expressionType == common::ExpressionType::FUNCTION) {
+    auto* list = children[0]->ptrCast<binder::ScalarFunctionExpression>();
+    if (list->getDataType().id() != DataTypeId::kArray) {
+      return false;
+    }
+    for (const auto& item : list->getChildren()) {
+      if (item->expressionType != common::ExpressionType::PROPERTY) {
+        return false;
+      }
+      properties.push_back(item->ptrCast<binder::PropertyExpression>());
+    }
+  } else {
+    return false;
+  }
   query = std::dynamic_pointer_cast<binder::LiteralExpression>(children[1]);
-  return property != nullptr && query != nullptr && !query->isNull() &&
+  if (properties.empty() || !properties[0]) {
+    return false;
+  }
+  for (const auto* property : properties) {
+    if (!property ||
+        property->getVariableName() != properties[0]->getVariableName() ||
+        property->getSingleTableID() != properties[0]->getSingleTableID()) {
+      return false;
+    }
+  }
+  return query != nullptr && !query->isNull() &&
          query->getDataType().id() == DataTypeId::kVarchar;
+}
+
+std::string JoinPropertyNames(const std::vector<std::string>& names) {
+  std::string result;
+  for (const auto& name : names) {
+    if (!result.empty()) {
+      result.push_back('\x1f');
+    }
+    result += name;
+  }
+  return result;
+}
+
+std::vector<std::string> SplitPropertyNames(const std::string& encoded) {
+  std::vector<std::string> names;
+  size_t begin = 0;
+  while (begin <= encoded.size()) {
+    auto end = encoded.find('\x1f', begin);
+    names.push_back(encoded.substr(begin, end - begin));
+    if (end == std::string::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  return names;
 }
 
 bool ContainsPrimaryKeyPredicate(
@@ -171,7 +221,7 @@ std::unique_ptr<function::CallFuncInputBase> BindSQLiteFTSIndexScan(
         "SQLITE_FTS_INDEX_SCAN must produce node and score columns");
   }
   input->label_id = static_cast<label_t>(std::stoul(label));
-  input->property_name = std::move(property);
+  input->property_names = SplitPropertyNames(property);
   input->query_string = target.operators(0).const_().str();
   input->topk = static_cast<uint32_t>(std::stoul(topk));
   input->node_alias = op.meta_data(0).alias();
@@ -189,7 +239,7 @@ execution::Context ExecuteSQLiteFTSIndexScan(
   }
 
   auto indexes =
-      reader->index_manager().GetIndex(input.label_id, input.property_name);
+      reader->index_manager().GetIndex(input.label_id, input.property_names);
   if (!indexes) {
     THROW_RUNTIME_ERROR(indexes.error().ToString());
   }
@@ -339,14 +389,15 @@ SQLiteFTSIndexScanOptimizer::visitOrderByReplace(
   if (!bm25) {
     return op;
   }
-  const binder::PropertyExpression* property = nullptr;
+  std::vector<const binder::PropertyExpression*> properties;
   std::shared_ptr<binder::LiteralExpression> query;
-  if (!ExtractBM25Arguments(*bm25, property, query) ||
-      !property->isSingleLabel()) {
+  if (!ExtractBM25Arguments(*bm25, properties, query) ||
+      !properties[0]->isSingleLabel()) {
     THROW_NOT_SUPPORTED_EXCEPTION(
         "SQLITE_FTS_BM25 requires a node STRING property and a string literal "
         "query");
   }
+  const auto* property = properties[0];
 
   const binder::PropertyExpression* vertex_output = nullptr;
   bool attach_input = true;
@@ -382,7 +433,12 @@ SQLiteFTSIndexScanOptimizer::visitOrderByReplace(
   auto bind_data =
       std::make_unique<function::IndexScanBindData>(columns, "", query);
   bind_data->options["label_id"] = std::to_string(property->getSingleTableID());
-  bind_data->options["property_name"] = property->getPropertyName();
+  std::vector<std::string> property_names;
+  property_names.reserve(properties.size());
+  for (const auto* indexed_property : properties) {
+    property_names.push_back(indexed_property->getPropertyName());
+  }
+  bind_data->options["property_name"] = JoinPropertyNames(property_names);
   bind_data->options["topk"] = std::to_string(order_by->getLimitNum());
 
   auto table_call = std::make_shared<planner::LogicalTableFunctionCall>(

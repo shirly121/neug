@@ -39,9 +39,20 @@ class ColumnBase;
 
 struct IndexBindSchema {
   label_t label_id = 0;
-  // Only single-property indexes are supported.
+  // Legacy single-property fields kept for checkpoint compatibility.
   std::string property_name;
   DataType property_type;
+  std::vector<std::string> property_names;
+  std::vector<DataType> property_types;
+
+  std::vector<std::string> GetPropertyNames() const {
+    return property_names.empty() ? std::vector<std::string>{property_name}
+                                  : property_names;
+  }
+  std::vector<DataType> GetPropertyTypes() const {
+    return property_types.empty() ? std::vector<DataType>{property_type}
+                                  : property_types;
+  }
 
   rapidjson::Value ToJson(rapidjson::Document::AllocatorType& alloc) const;
   static IndexBindSchema FromJson(const rapidjson::Value& obj);
@@ -66,6 +77,7 @@ struct IndexQueryParams {
 
 struct IndexBindContext {
   const ColumnBase* column = nullptr;
+  std::vector<const ColumnBase*> columns;
 };
 
 // --- Index base class ---
@@ -117,6 +129,7 @@ class StorageIndex : public Module {
    * @param new_value The new property value for the indexed column.
    */
   Status Upsert(vid_t vid, const Value& new_value);
+  Status Upsert(vid_t vid, const std::vector<Value>& new_values);
 
   /**
    * @brief Mark a vertex as deleted in the index.
@@ -130,6 +143,14 @@ class StorageIndex : public Module {
   virtual result<std::vector<index_id_t>> SearchImpl(
       const IndexQueryParams& params) = 0;
   virtual Status AppendImpl(index_id_t index_id, const Value& value) = 0;
+  virtual Status AppendImpl(index_id_t index_id,
+                            const std::vector<Value>& values) {
+    if (values.size() != 1) {
+      return Status(StatusCode::ERR_INVALID_ARGUMENT,
+                    "Index implementation requires exactly one property value");
+    }
+    return AppendImpl(index_id, values[0]);
+  }
 
   std::unique_ptr<IndexMeta> meta_;
   std::unique_ptr<IndexIDAccessor> index_id_accessor_;

@@ -17,6 +17,8 @@
 
 #include "neug/storages/index/storage_index_manager.h"
 
+#include <unordered_set>
+
 namespace neug {
 
 namespace {
@@ -68,6 +70,7 @@ static Status addVertexIndexData(PropertyGraph& graph, label_t label, vid_t lid,
                                  const std::vector<Value>& props) {
   const auto& v_schema = graph.schema().get_vertex_schema(label);
   auto& index_manager = graph.mutable_index_manager();
+  std::unordered_set<StorageIndex*> processed;
   for (size_t prop_idx = 0; prop_idx < v_schema->property_names.size();
        ++prop_idx) {
     if (v_schema->vprop_soft_deleted[prop_idx] || prop_idx >= props.size()) {
@@ -79,7 +82,20 @@ static Status addVertexIndexData(PropertyGraph& graph, label_t label, vid_t lid,
       return indexes.error();
     }
     for (auto* index : indexes.value()) {
-      RETURN_IF_NOT_OK(index->Upsert(lid, props[prop_idx]));
+      if (!processed.insert(index).second) {
+        continue;
+      }
+      std::vector<Value> values;
+      for (const auto& property_name :
+           index->GetMeta().schema.GetPropertyNames()) {
+        auto id = v_schema->get_property_id(property_name);
+        if (static_cast<size_t>(id) >= props.size()) {
+          return Status::InternalError("Indexed property value is missing: " +
+                                       property_name);
+        }
+        values.push_back(props[id]);
+      }
+      RETURN_IF_NOT_OK(index->Upsert(lid, values));
     }
   }
   return Status::OK();
@@ -102,6 +118,7 @@ static Status batchAddVertexIndexData(PropertyGraph& graph, label_t label,
   const auto& v_schema = graph.schema().get_vertex_schema(label);
   const auto& vtable = graph.get_vertex_table(label);
   auto& index_manager = graph.mutable_index_manager();
+  std::unordered_set<StorageIndex*> processed;
 
   for (size_t prop_idx = 0; prop_idx < v_schema->property_names.size();
        ++prop_idx) {
@@ -121,8 +138,21 @@ static Status batchAddVertexIndexData(PropertyGraph& graph, label_t label,
       continue;
     }
     for (auto* index : indexes.value()) {
+      if (!processed.insert(index).second) {
+        continue;
+      }
       for (vid_t vid : vids) {
-        RETURN_IF_NOT_OK(index->Upsert(vid, col->get_any(vid)));
+        std::vector<Value> values;
+        for (const auto& property_name :
+             index->GetMeta().schema.GetPropertyNames()) {
+          auto value_column = vtable.GetPropertyColumnBase(property_name);
+          if (!value_column) {
+            return Status::InternalError(
+                "Indexed property column is missing: " + property_name);
+          }
+          values.push_back(value_column->get_any(vid));
+        }
+        RETURN_IF_NOT_OK(index->Upsert(vid, values));
       }
     }
   }
@@ -158,7 +188,18 @@ static Status updateVertexIndexData(PropertyGraph& graph, label_t label,
     return indexes.error();
   }
   for (auto* index : indexes.value()) {
-    RETURN_IF_NOT_OK(index->Upsert(lid, value));
+    std::vector<Value> values;
+    const auto& vertex_table = graph.get_vertex_table(label);
+    for (const auto& property_name :
+         index->GetMeta().schema.GetPropertyNames()) {
+      auto value_column = vertex_table.GetPropertyColumnBase(property_name);
+      if (!value_column) {
+        return Status::InternalError("Indexed property column is missing: " +
+                                     property_name);
+      }
+      values.push_back(value_column->get_any(lid));
+    }
+    RETURN_IF_NOT_OK(index->Upsert(lid, values));
   }
   return Status::OK();
 }
@@ -179,6 +220,7 @@ static Status deleteVertexIndexData(PropertyGraph& graph, label_t label,
                                     const std::vector<vid_t>& vids) {
   const auto& v_schema = graph.schema().get_vertex_schema(label);
   auto& index_manager = graph.mutable_index_manager();
+  std::unordered_set<StorageIndex*> processed;
   for (size_t prop_idx = 0; prop_idx < v_schema->property_names.size();
        ++prop_idx) {
     if (v_schema->vprop_soft_deleted[prop_idx]) {
@@ -190,6 +232,9 @@ static Status deleteVertexIndexData(PropertyGraph& graph, label_t label,
       return indexes.error();
     }
     for (auto* index : indexes.value()) {
+      if (!processed.insert(index).second) {
+        continue;
+      }
       for (vid_t vid : vids) {
         RETURN_IF_NOT_OK(index->Delete(vid));
       }
@@ -462,12 +507,20 @@ Status StorageAPUpdateInterface::DeleteEdgeType(const std::string& src_type,
 neug::result<StorageIndex*> StorageAPUpdateInterface::CreateIndex(
     const std::string& name, std::unique_ptr<IndexMeta> meta) {
   auto label_id = meta->schema.label_id;
-  const auto& property_name = meta->schema.property_name;
+  const auto property_names = meta->schema.GetPropertyNames();
+  const auto property_types = meta->schema.GetPropertyTypes();
+  if (property_names.empty() ||
+      property_names.size() != property_types.size()) {
+    RETURN_STATUS_ERROR(
+        StatusCode::ERR_INVALID_ARGUMENT,
+        "Index properties and types must be non-empty and aligned");
+  }
   auto& vertex_table = graph_.get_vertex_table(label_id);
   std::unique_ptr<IndexIDAccessor> index_id_accessor;
-  if (meta->schema.property_type.id() == DataTypeId::kArray) {
-    auto* column =
-        dynamic_cast<VecColumn*>(vertex_table.UpgradeVecColumn(property_name));
+  if (property_names.size() == 1 &&
+      property_types[0].id() == DataTypeId::kArray) {
+    auto* column = dynamic_cast<VecColumn*>(
+        vertex_table.UpgradeVecColumn(property_names[0]));
     if (!column) {
       RETURN_STATUS_ERROR(StatusCode::ERR_INTERNAL_ERROR,
                           "Failed to upgrade property to VecColumn");
@@ -484,9 +537,12 @@ neug::result<StorageIndex*> StorageAPUpdateInterface::CreateIndex(
     return tl::unexpected(index.error());
   }
   const auto& index_meta = index.value()->GetMeta();
-  const auto* column =
-      vertex_table.GetPropertyColumnBase(index_meta.schema.property_name);
-  auto status = index.value()->Rebind(IndexBindContext{column});
+  std::vector<const ColumnBase*> columns;
+  for (const auto& property_name : index_meta.schema.GetPropertyNames()) {
+    columns.push_back(vertex_table.GetPropertyColumnBase(property_name));
+  }
+  auto status = index.value()->Rebind(
+      IndexBindContext{columns.empty() ? nullptr : columns[0], columns});
   if (!status.ok()) {
     RETURN_ERROR(status);
   }

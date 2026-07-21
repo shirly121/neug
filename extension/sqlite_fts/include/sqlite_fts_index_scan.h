@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "neug/compiler/function/function.h"
 #include "neug/compiler/function/neug_call_function.h"
@@ -11,7 +12,7 @@ namespace neug::sqlite_fts_ext {
 
 struct SQLiteFTSIndexScanFuncInput final : function::CallFuncInputBase {
   label_t label_id;
-  std::string property_name;
+  std::vector<std::string> property_names;
   std::string query_string;
   uint32_t topk;
   int32_t node_alias;

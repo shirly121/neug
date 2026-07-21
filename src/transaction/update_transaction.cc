@@ -24,6 +24,7 @@
 #include <limits>
 #include <ostream>
 #include <string_view>
+#include <unordered_set>
 
 #include <flat_hash_map.hpp>
 #include "neug/common/extra_type_info.h"
@@ -246,6 +247,7 @@ static Status addVertexIndexData(PropertyGraph& graph, label_t label, vid_t lid,
                                  const IndexDetachFn& detach_index = nullptr) {
   const auto& v_schema = graph.schema().get_vertex_schema(label);
   auto& index_manager = graph.mutable_index_manager();
+  std::unordered_set<StorageIndex*> processed;
   for (size_t prop_idx = 0; prop_idx < v_schema->property_names.size();
        ++prop_idx) {
     if (v_schema->vprop_soft_deleted[prop_idx] || prop_idx >= props.size()) {
@@ -257,10 +259,23 @@ static Status addVertexIndexData(PropertyGraph& graph, label_t label, vid_t lid,
       return indexes.error();
     }
     for (auto* index : indexes.value()) {
+      if (!processed.insert(index).second) {
+        continue;
+      }
       if (detach_index) {
         RETURN_IF_NOT_OK(detach_index(*index));
       }
-      RETURN_IF_NOT_OK(index->Upsert(lid, props[prop_idx]));
+      std::vector<Value> values;
+      for (const auto& property_name :
+           index->GetMeta().schema.GetPropertyNames()) {
+        auto id = v_schema->get_property_id(property_name);
+        if (static_cast<size_t>(id) >= props.size()) {
+          return Status::InternalError("Indexed property value is missing: " +
+                                       property_name);
+        }
+        values.push_back(props[id]);
+      }
+      RETURN_IF_NOT_OK(index->Upsert(lid, values));
     }
   }
   return Status::OK();
@@ -294,11 +309,27 @@ static Status updateVertexIndexData(
   if (!indexes) {
     return indexes.error();
   }
+  const auto& vertex_table = graph.get_vertex_table(label);
   for (auto* index : indexes.value()) {
     if (detach_index) {
       RETURN_IF_NOT_OK(detach_index(*index));
     }
-    RETURN_IF_NOT_OK(index->Upsert(lid, value));
+    std::vector<Value> values;
+    for (const auto& property_name :
+         index->GetMeta().schema.GetPropertyNames()) {
+      auto property_id = v_schema->get_property_id(property_name);
+      if (property_id == col_id) {
+        values.push_back(value);
+        continue;
+      }
+      auto column = vertex_table.GetPropertyColumnBase(property_name);
+      if (!column) {
+        return Status::InternalError("Indexed property column is missing: " +
+                                     property_name);
+      }
+      values.push_back(column->get_any(lid));
+    }
+    RETURN_IF_NOT_OK(index->Upsert(lid, values));
   }
   return Status::OK();
 }
@@ -321,6 +352,7 @@ static Status deleteVertexIndexData(
     const IndexDetachFn& detach_index = nullptr) {
   const auto& v_schema = graph.schema().get_vertex_schema(label);
   auto& index_manager = graph.mutable_index_manager();
+  std::unordered_set<StorageIndex*> processed;
   for (size_t prop_idx = 0; prop_idx < v_schema->property_names.size();
        ++prop_idx) {
     if (v_schema->vprop_soft_deleted[prop_idx]) {
@@ -332,6 +364,9 @@ static Status deleteVertexIndexData(
       return indexes.error();
     }
     for (auto* index : indexes.value()) {
+      if (!processed.insert(index).second) {
+        continue;
+      }
       if (detach_index) {
         RETURN_IF_NOT_OK(detach_index(*index));
       }

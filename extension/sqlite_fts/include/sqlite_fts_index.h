@@ -66,6 +66,8 @@ class SQLiteFTSIndex final : public StorageIndex {
   result<std::vector<index_id_t>> SearchImpl(
       const IndexQueryParams& params) override;
   Status AppendImpl(index_id_t index_id, const Value& value) override;
+  Status AppendImpl(index_id_t index_id,
+                    const std::vector<Value>& values) override;
 
  private:
   struct RankedCandidate {
@@ -92,6 +94,7 @@ class SQLiteFTSIndex final : public StorageIndex {
   std::string detail_{"full"};
   std::string rank_{"bm25"};
   uint32_t candidate_batch_size_{128};
+  std::vector<double> column_weights_;
 };
 
 }  // namespace neug::sqlite_fts_ext

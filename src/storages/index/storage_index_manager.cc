@@ -17,6 +17,8 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
+
 #include "neug/compiler/common/string_utils.h"
 #include "neug/storages/module/module_factory.h"
 
@@ -88,7 +90,20 @@ neug::result<std::vector<StorageIndex*>> StorageIndexManager::GetIndex(
     if (meta.schema.label_id != label_id) {
       continue;
     }
-    if (meta.schema.property_name == property_name) {
+    const auto names = meta.schema.GetPropertyNames();
+    if (std::find(names.begin(), names.end(), property_name) != names.end()) {
+      target_indexes.push_back(index.get());
+    }
+  }
+  return target_indexes;
+}
+
+neug::result<std::vector<StorageIndex*>> StorageIndexManager::GetIndex(
+    label_t label_id, const std::vector<std::string>& property_names) const {
+  std::vector<StorageIndex*> target_indexes;
+  for (const auto& [name, index] : indexes_) {
+    if (index && index->GetMeta().schema.label_id == label_id &&
+        index->GetMeta().schema.GetPropertyNames() == property_names) {
       target_indexes.push_back(index.get());
     }
   }

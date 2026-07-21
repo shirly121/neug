@@ -61,6 +61,8 @@ class StorageIndexManager {
    */
   neug::result<std::vector<StorageIndex*>> GetIndex(
       label_t label_id, const std::string& property_name) const;
+  neug::result<std::vector<StorageIndex*>> GetIndex(
+      label_t label_id, const std::vector<std::string>& property_names) const;
 
   StorageIndex* GetIndexByName(const std::string& name) const;
 

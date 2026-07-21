@@ -804,10 +804,14 @@ void PropertyGraph::Open(std::shared_ptr<Checkpoint> ckp,
     if (index_meta.schema.label_id >= vertex_tables_.size()) {
       THROW_RUNTIME_ERROR("PropertyGraph::Open: invalid index label id");
     }
-    const auto* column =
-        vertex_tables_[index_meta.schema.label_id].GetPropertyColumnBase(
-            index_meta.schema.property_name);
-    auto status = index->Rebind(IndexBindContext{column});
+    std::vector<const ColumnBase*> columns;
+    for (const auto& property_name : index_meta.schema.GetPropertyNames()) {
+      columns.push_back(
+          vertex_tables_[index_meta.schema.label_id].GetPropertyColumnBase(
+              property_name));
+    }
+    auto status = index->Rebind(
+        IndexBindContext{columns.empty() ? nullptr : columns[0], columns});
     if (!status.ok()) {
       THROW_RUNTIME_ERROR("PropertyGraph::Open: failed to bind index '" +
                           index_meta.name + "': " + status.error_message());

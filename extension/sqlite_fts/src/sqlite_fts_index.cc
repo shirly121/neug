@@ -123,18 +123,46 @@ void SQLiteFTSIndex::ParseOptions() {
     THROW_INVALID_ARGUMENT_EXCEPTION(
         "SQLiteFTSIndex name must be a non-empty SQL-safe identifier");
   }
-  if (meta_->schema.property_name.empty() ||
-      meta_->schema.property_type.id() != DataTypeId::kVarchar) {
+  const auto property_names = meta_->schema.GetPropertyNames();
+  const auto property_types = meta_->schema.GetPropertyTypes();
+  if (property_names.empty() ||
+      property_names.size() != property_types.size() ||
+      std::any_of(property_names.begin(), property_names.end(),
+                  [](const auto& name) { return name.empty(); }) ||
+      std::any_of(
+          property_types.begin(), property_types.end(),
+          [](const auto& type) { return type.id() != DataTypeId::kVarchar; })) {
     THROW_INVALID_ARGUMENT_EXCEPTION(
-        "SQLiteFTSIndex requires one non-empty STRING property");
+        "SQLiteFTSIndex requires one or more non-empty STRING properties");
   }
 
   static const std::unordered_set<std::string> kKnownOptions = {
       "tokenizer", "prefix", "detail", "rank", "candidate_batch_size"};
   for (const auto& [name, value] : meta_->options) {
-    if (!kKnownOptions.contains(ToLower(name))) {
+    auto normalized = ToLower(name);
+    bool is_weight = false;
+    for (const auto& property_name : property_names) {
+      is_weight = is_weight || normalized == ToLower(property_name) + "_weight";
+    }
+    if (!kKnownOptions.contains(normalized) && !is_weight) {
       THROW_INVALID_ARGUMENT_EXCEPTION("Unsupported SQLiteFTSIndex option: " +
                                        name);
+    }
+  }
+  column_weights_.assign(property_names.size(), 1.0);
+  for (size_t i = 0; i < property_names.size(); ++i) {
+    auto option = meta_->options.find(property_names[i] + "_weight");
+    if (option == meta_->options.end()) {
+      continue;
+    }
+    try {
+      column_weights_[i] = std::stod(option->second);
+      if (!(column_weights_[i] > 0.0)) {
+        throw std::invalid_argument("weight");
+      }
+    } catch (const std::exception&) {
+      THROW_INVALID_ARGUMENT_EXCEPTION("SQLiteFTSIndex " + property_names[i] +
+                                       "_weight must be positive");
     }
   }
 
@@ -187,9 +215,15 @@ void SQLiteFTSIndex::ParseOptions() {
 }
 
 void SQLiteFTSIndex::CreateTable() {
-  std::string sql = "CREATE VIRTUAL TABLE " + table_name_ +
-                    " USING fts5(text, content='', tokenize='" + tokenizer_ +
-                    "'";
+  std::string sql = "CREATE VIRTUAL TABLE " + table_name_ + " USING fts5(";
+  const auto property_names = meta_->schema.GetPropertyNames();
+  for (size_t i = 0; i < property_names.size(); ++i) {
+    if (i != 0) {
+      sql += ", ";
+    }
+    sql += "column_" + std::to_string(i);
+  }
+  sql += ", content='', tokenize='" + tokenizer_ + "'";
   if (!prefix_.empty()) {
     sql += ", prefix='" + prefix_ + "'";
   }
@@ -315,10 +349,14 @@ SQLiteFTSIndex::QueryCandidates(const SQLiteFTSQueryParams& params) {
   }
 
   try {
+    std::string rank_expression = rank_ + "(" + table_name_;
+    for (double weight : column_weights_) {
+      rank_expression += ", " + std::to_string(weight);
+    }
+    rank_expression += ")";
     auto statement = database_.Prepare(
-        "SELECT rowid, " + rank_ + "(" + table_name_ + ") AS score FROM " +
-        table_name_ + " WHERE " + table_name_ +
-        " MATCH ?1 ORDER BY score ASC LIMIT ?2;");
+        "SELECT rowid, " + rank_expression + " AS score FROM " + table_name_ +
+        " WHERE " + table_name_ + " MATCH ?1 ORDER BY score ASC LIMIT ?2;");
     statement.BindText(1, params.query_string);
     auto fetch_limit =
         params.use_scalar_filter
@@ -413,18 +451,35 @@ result<std::vector<index_id_t>> SQLiteFTSIndex::SearchImpl(
 }
 
 Status SQLiteFTSIndex::AppendImpl(index_id_t index_id, const Value& value) {
-  if (value.IsNull() || value.type().id() != DataTypeId::kVarchar) {
+  return AppendImpl(index_id, std::vector<Value>{value});
+}
+
+Status SQLiteFTSIndex::AppendImpl(index_id_t index_id,
+                                  const std::vector<Value>& values) {
+  if (values.size() != meta_->schema.GetPropertyNames().size() ||
+      std::any_of(values.begin(), values.end(), [](const auto& value) {
+        return value.IsNull() || value.type().id() != DataTypeId::kVarchar;
+      })) {
     return Status(StatusCode::ERR_INVALID_ARGUMENT,
-                  "SQLITE_FTS values must be non-null STRING values");
+                  "SQLITE_FTS values must match the indexed STRING properties");
   }
   if (!database_.IsOpen()) {
     return Status::RuntimeError("SQLiteFTSIndex must be open before append");
   }
   try {
-    auto statement = database_.Prepare("INSERT INTO " + table_name_ +
-                                       "(rowid, text) VALUES (?1, ?2);");
+    std::string sql = "INSERT INTO " + table_name_ + "(rowid";
+    std::string placeholders = "?1";
+    for (size_t i = 0; i < values.size(); ++i) {
+      sql += ", column_" + std::to_string(i);
+      placeholders += ", ?" + std::to_string(i + 2);
+    }
+    sql += ") VALUES (" + placeholders + ");";
+    auto statement = database_.Prepare(sql);
     statement.BindInt64(1, index_id);
-    statement.BindText(2, value.GetValue<std::string>());
+    for (size_t i = 0; i < values.size(); ++i) {
+      statement.BindText(static_cast<int>(i + 2),
+                         values[i].GetValue<std::string>());
+    }
     statement.Step();
     return Status::OK();
   } catch (const std::exception& error) {
