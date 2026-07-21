@@ -18,9 +18,12 @@
 
 """The Neug database module."""
 
+import ctypes
+import json
 import logging
 import os
 import time
+from pathlib import Path
 
 try:
     import neug_py_bind
@@ -38,6 +41,74 @@ from neug.utils import readable
 from neug.version import __version__
 
 logger = logging.getLogger(__name__)
+
+_preloaded_extension_handles = {}
+
+
+def _checkpoint_uses_module(db_path, module_type):
+    """Return whether a persisted checkpoint references an extension module."""
+    if not db_path or db_path in (":memory", ":memory:"):
+        return False
+
+    checkpoint_root = Path(db_path)
+    if not checkpoint_root.is_dir():
+        return False
+
+    meta_paths = []
+    for meta_path in checkpoint_root.glob("checkpoint-*/meta"):
+        try:
+            checkpoint_id = int(meta_path.parent.name.removeprefix("checkpoint-"))
+            meta_paths.append((checkpoint_id, meta_path))
+        except ValueError:
+            continue
+    if not meta_paths:
+        return False
+
+    meta_path = max(meta_paths)[1]
+    try:
+        metadata = json.loads(meta_path.read_text())
+        modules = metadata.get("modules", {})
+        return any(
+            descriptor.get("module_type") == module_type
+            for descriptor in modules.values()
+        )
+    except (OSError, ValueError, AttributeError):
+        logger.debug("Unable to inspect checkpoint metadata: %s", meta_path)
+        return False
+
+
+def _preload_persisted_modules(db_path):
+    """Register extension-owned modules before the native database is opened."""
+    if not _checkpoint_uses_module(db_path, "hnsw_index"):
+        return
+
+    extension_home = Path(os.environ["NEUG_EXTENSION_HOME_PYENV"])
+    extension_path = extension_home / "extension" / "zvec" / "libzvec.neug_extension"
+    if not extension_path.is_file():
+        raise RuntimeError(
+            "The database contains a persisted HNSW index, but the zvec "
+            f"extension is not installed at {extension_path}."
+        )
+
+    extension_key = str(extension_path.resolve())
+    if extension_key in _preloaded_extension_handles:
+        return
+
+    # Keep both handles alive for as long as the Python process may use the
+    # ModuleFactory creator registered by the extension.
+    bind_dir = Path(neug_py_bind.__file__).resolve().parent
+    libneug_paths = list(bind_dir.glob("libneug.*"))
+    if libneug_paths:
+        libneug_path = libneug_paths[0]
+        _preloaded_extension_handles[str(libneug_path)] = ctypes.CDLL(
+            str(libneug_path), mode=ctypes.RTLD_GLOBAL
+        )
+    extension = ctypes.CDLL(extension_key, mode=ctypes.RTLD_LOCAL)
+    register_modules = extension.RegisterModules
+    register_modules.argtypes = []
+    register_modules.restype = None
+    register_modules()
+    _preloaded_extension_handles[extension_key] = extension
 
 
 class Database(object):
@@ -178,6 +249,7 @@ class Database(object):
 
         # Currently, no intellisense here. self._database is of class PyDatabase,
         # defined in tools/python_bind/src/py_database.h
+        _preload_persisted_modules(self._db_path)
         self._database = neug_py_bind.PyDatabase(
             database_path=self._db_path,
             max_thread_num=max_thread_num,

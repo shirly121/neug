@@ -3,6 +3,9 @@
 
 import math
 import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -243,3 +246,48 @@ def test_updated_vector_persistence_after_checkpoint_and_close(tmp_path):
         assert rows[0][1] == pytest.approx(0.0, abs=1e-6)
     finally:
         _close_database(reopened_db, reopened_conn)
+
+
+def test_index_persistence_after_process_restart(tmp_path):
+    db_path = tmp_path / "database"
+    create_script = textwrap.dedent(
+        f"""
+        from neug import Database
+
+        db = Database({str(db_path)!r}, mode="w")
+        conn = db.connect()
+        conn.execute("LOAD zvec;")
+        conn.execute(
+            "CREATE NODE TABLE Item(id STRING PRIMARY KEY, embedding FLOAT[4]);"
+        )
+        conn.execute(
+            "CREATE (:Item {{id: 'a', embedding: [1.0, 0.0, 0.0, 0.0]}});"
+        )
+        conn.execute(
+            "CREATE INDEX item_embedding_hnsw ON Item USING HNSW (embedding) "
+            "WITH (metric = 'ip');"
+        )
+        conn.close()
+        db.close()
+        """
+    )
+    subprocess.run([sys.executable, "-c", create_script], check=True)
+
+    reopen_script = textwrap.dedent(
+        f"""
+        from neug import Database
+
+        db = Database({str(db_path)!r}, mode="w", checkpoint_on_close=False)
+        conn = db.connect()
+        conn.execute("LOAD zvec;")
+        rows = list(conn.execute(
+            "MATCH (n:Item) RETURN n.id, "
+            "vector_distance_ip(n.embedding, [1.0, 0.0, 0.0, 0.0]) AS score "
+            "ORDER BY score DESC LIMIT 1;"
+        ))
+        assert rows == [["a", 1.0]], rows
+        conn.close()
+        db.close()
+        """
+    )
+    subprocess.run([sys.executable, "-c", reopen_script], check=True)
