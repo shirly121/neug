@@ -66,6 +66,10 @@ class CreateIndexOpr : public IOperator {
       }
       columns.push_back(column);
     }
+    auto status = index->BeginBuild();
+    if (!status.ok()) {
+      return tl::unexpected(status);
+    }
     auto vertices = update_interface->GetVertexSet(label_id);
     for (vid_t vid : vertices) {
       std::vector<Value> values;
@@ -73,10 +77,14 @@ class CreateIndexOpr : public IOperator {
       for (const auto& column : columns) {
         values.push_back(column->get_any(vid));
       }
-      auto status = index->Upsert(vid, values);
+      status = index->Upsert(vid, values);
       if (!status.ok()) {
         return tl::unexpected(status);
       }
+    }
+    status = index->FinishBuild();
+    if (!status.ok()) {
+      return tl::unexpected(status);
     }
 
     return std::move(ctx);

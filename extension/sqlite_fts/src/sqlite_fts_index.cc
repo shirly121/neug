@@ -336,6 +336,34 @@ std::unique_ptr<Module> SQLiteFTSIndex::Clone() const {
   THROW_NOT_SUPPORTED_EXCEPTION("SQLiteFTSIndex does not support Clone");
 }
 
+Status SQLiteFTSIndex::BeginBuild() {
+  if (!database_.IsOpen()) {
+    return Status::RuntimeError(
+        "SQLiteFTSIndex must be open before beginning a build");
+  }
+  try {
+    database_.Execute("BEGIN TRANSACTION;");
+    return Status::OK();
+  } catch (const std::exception& error) {
+    return Status::RuntimeError("SQLiteFTSIndex begin build failed: " +
+                                std::string(error.what()));
+  }
+}
+
+Status SQLiteFTSIndex::FinishBuild() {
+  if (!database_.IsOpen()) {
+    return Status::RuntimeError(
+        "SQLiteFTSIndex must be open before finishing a build");
+  }
+  try {
+    database_.Execute("COMMIT;");
+    return Status::OK();
+  } catch (const std::exception& error) {
+    return Status::RuntimeError("SQLiteFTSIndex finish build failed: " +
+                                std::string(error.what()));
+  }
+}
+
 result<std::vector<SQLiteFTSIndex::RankedCandidate>>
 SQLiteFTSIndex::QueryCandidates(const SQLiteFTSQueryParams& params) {
   if (params.topk == 0) {

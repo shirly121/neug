@@ -161,6 +161,23 @@ TEST(SQLiteFTSIndexTest, RankedSearchSupportsWordsPhrasesAndPrefixes) {
             std::string::npos);
 }
 
+TEST(SQLiteFTSIndexTest, BulkBuildCommitsInsertedRows) {
+  TemporaryDatabaseDirectory directory;
+  auto checkpoint = Checkpoint::Open(directory.path().string(), 0);
+  auto index = MakeOpenedIndex(*checkpoint);
+
+  ASSERT_TRUE(index->BeginBuild().ok());
+  ASSERT_TRUE(index->Upsert(7, Value::STRING("bulk build fox")).ok());
+  ASSERT_TRUE(index->Upsert(8, Value::STRING("bulk build hare")).ok());
+  ASSERT_TRUE(index->FinishBuild().ok());
+
+  auto results = index->RankedSearch(MakeQuery("bulk"));
+  ASSERT_TRUE(results.has_value()) << results.error().ToString();
+  ASSERT_EQ(results->size(), 2);
+  EXPECT_EQ(results->at(0).vid, 7u);
+  EXPECT_EQ(results->at(1).vid, 8u);
+}
+
 TEST(SQLiteFTSExtensionTest, FusedTopKQueryReturnsNodesAndScores) {
   const auto build_root = FindBuildRoot();
   ASSERT_FALSE(build_root.empty());
