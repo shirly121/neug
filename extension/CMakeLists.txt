@@ -22,9 +22,12 @@ function(set_extension_properties target_name output_name extension_name)
         set(_ext_rpath 
             "@loader_path/../../neug/.dylibs"
             "@loader_path/../.."
+            "@loader_path/../../neug.libs"
             "@loader_path")
     else()
-        set(_ext_rpath "$ORIGIN/../..")
+        set(_ext_rpath
+            "$ORIGIN/../.."
+            "$ORIGIN/../../neug.libs")
     endif()
     set_target_properties(${target_name}
             PROPERTIES

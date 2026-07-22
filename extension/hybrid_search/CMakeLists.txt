@@ -94,6 +94,15 @@ set(_zvec_turbo_library "${_zvec_binary_dir}/lib/libzvec_turbo.a")
 # ZVec currently creates several common third-party targets unconditionally.
 # Build it in an isolated CMake project to avoid collisions with NeuG's gtest,
 # gflags, glog, protobuf, yaml-cpp, and utf8proc targets.
+set(_zvec_auto_detect_arch OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|x86|i[3-6]86)$")
+    # RaBitQ is enabled on Linux x86 when the compiler supports AVX2. ZVec's
+    # per-source AVX2 flags are populated only when architecture detection is
+    # enabled; without them, the RaBitQ headers intentionally fail to compile.
+    set(_zvec_auto_detect_arch ON)
+endif()
+
 set(_zvec_cmake_args
     "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
@@ -102,7 +111,7 @@ set(_zvec_cmake_args
     "-DBUILD_ZVEC_AILEGO_SHARED=OFF"
     "-DBUILD_PYTHON_BINDINGS=OFF"
     "-DBUILD_C_BINDINGS=OFF"
-    "-DAUTO_DETECT_ARCH=OFF"
+    "-DAUTO_DETECT_ARCH=${_zvec_auto_detect_arch}"
     "-DBUILD_TOOLS=OFF")
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
     list(APPEND _zvec_cmake_args
@@ -159,9 +168,6 @@ target_include_directories(neug_hybrid_search_extension PRIVATE
     ${ZVEC_SOURCE_DIR}/src/include)
 target_link_libraries(neug_hybrid_search_extension PRIVATE
     neug
-    zvec_core_static
-    zvec_ailego_static
-    zvec_turbo_static
     zvec_roaring
     neug_sqlite3
     ${Protobuf_LIBRARIES})
@@ -180,6 +186,11 @@ elseif(UNIX)
         zvec_ailego_static
         zvec_turbo_static
         -Wl,--no-whole-archive)
+else()
+    target_link_libraries(neug_hybrid_search_extension PRIVATE
+        zvec_core_static
+        zvec_ailego_static
+        zvec_turbo_static)
 endif()
 add_dependencies(neug_hybrid_search_extension
     zvec_external
