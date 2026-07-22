@@ -83,10 +83,15 @@ def _preload_persisted_modules(db_path):
         return
 
     extension_home = Path(os.environ["NEUG_EXTENSION_HOME_PYENV"])
-    extension_path = extension_home / "extension" / "zvec" / "libzvec.neug_extension"
+    extension_path = (
+        extension_home
+        / "extension"
+        / "hybrid_search"
+        / "libhybrid_search.neug_extension"
+    )
     if not extension_path.is_file():
         raise RuntimeError(
-            "The database contains a persisted HNSW index, but the zvec "
+            "The database contains a persisted HNSW index, but the hybrid_search "
             f"extension is not installed at {extension_path}."
         )
 

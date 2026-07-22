@@ -46,36 +46,37 @@
 
 ## M0 deliverables
 
-- `extension/sqlite_fts/CMakeLists.txt` defines:
-  - `neug_sqlite_fts_extension`
-  - `sqlite_fts_extension_test`
-- `include/sqlite_fts_extension.h` owns the extension name constants.
-- `src/sqlite_fts_extension.cc` exports `Init()` and `Name()` and registers the
-  catalog extension name `sqlite_fts` with display name `SQLITE_FTS`.
+- `extension/hybrid_search/CMakeLists.txt` defines:
+  - `neug_hybrid_search_extension`
+  - `hybrid_search_extension_test`
+- `include/hybrid_search_extension.h` owns the extension name constants.
+- `src/hybrid_search_extension.cc` exports `Init()` and `Name()` and registers
+  the catalog extension name `hybrid_search` with display name
+  `HYBRID_SEARCH`.
 - `tests/sqlite_fts_extension_test.cc` opens a temporary NeuG database and
-  verifies that `LOAD sqlite_fts` succeeds.
+  verifies that `LOAD hybrid_search` succeeds.
 - `extension/CMakeLists.txt` contains the approved root-build registration:
-  `add_extension_if_enabled("sqlite_fts")`.
+  `add_extension_if_enabled("hybrid_search")`.
 
 ## Verification
 
 Configuration:
 
 ```sh
-cmake -S . -B build -DBUILD_TEST=ON -DBUILD_EXTENSIONS=sqlite_fts
+cmake -S . -B build -DBUILD_TEST=ON -DBUILD_EXTENSIONS=hybrid_search
 ```
 
 Build:
 
 ```sh
-cmake --build build --target sqlite_fts_extension_test -j8
+cmake --build build --target hybrid_search_extension_test -j8
 ```
 
 M3 test:
 
 ```sh
 ctest --test-dir build \
-  -R 'sqlite_fts_extension_test|SQLiteFTS' \
+  -R 'hybrid_search_extension_test|SQLiteFTS' \
   --output-on-failure
 ```
 
@@ -86,12 +87,12 @@ Result on 2026-07-17:
 ```
 
 Both the extension library and test executable were produced under
-`build/extension/sqlite_fts/`.
+`build/extension/hybrid_search/`.
 
 ## Scope and constraints carried forward
 
 - M0 contains no SQLite headers, libraries, or link items.
-- Tests remain C++/gtest tests under `extension/sqlite_fts/tests/`, following
+- Tests remain C++/gtest tests under `extension/hybrid_search/tests/`, following
   the zvec extension pattern. Python tests are not used for this extension.
 - The shared root build can be driven from `tools/python_bind/` when convenient,
   but extension tests remain native C++ targets.
@@ -111,7 +112,7 @@ Both the extension library and test executable were produced under
 - `SQLiteFTSQueryParams` carries the intact query string and Top-K value.
 - `SQLiteFTSIndex` is registered as `sqlite_fts_index` and returns deterministic
   `(vid, score)` stub results without linking SQLite.
-- `SQLITE_FTS_BM25` is binder-visible but rejects standalone scalar execution.
+- `BM25` is binder-visible but rejects standalone scalar execution.
 - `SQLiteFTSIndexScanOptimizer` recognizes only the complete ascending Top-K
   query shape and replaces scan, scoring, ordering, and limit with one
   `SQLITE_FTS_INDEX_SCAN` operator.
@@ -124,9 +125,9 @@ Both the extension library and test executable were produced under
 Verification:
 
 ```sh
-cmake --build build --target sqlite_fts_extension_test -j8
+cmake --build build --target hybrid_search_extension_test -j8
 ctest --test-dir build \
-  -R 'sqlite_fts_extension_test|SQLiteFTS' \
+  -R 'hybrid_search_extension_test|SQLiteFTS' \
   --output-on-failure
 ```
 

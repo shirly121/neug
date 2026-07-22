@@ -394,7 +394,7 @@ SQLiteFTSIndexScanOptimizer::visitOrderByReplace(
   if (!ExtractBM25Arguments(*bm25, properties, query) ||
       !properties[0]->isSingleLabel()) {
     THROW_NOT_SUPPORTED_EXCEPTION(
-        "SQLITE_FTS_BM25 requires a node STRING property and a string literal "
+        "BM25 requires a node STRING property and a string literal "
         "query");
   }
   const auto* property = properties[0];

@@ -13,13 +13,11 @@ from pathlib import Path
 
 import pytest
 
-
 os.environ["GLOG_minloglevel"] = "3"
 logging.disable(logging.CRITICAL)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from neug.database import Database  # noqa: E402
-
 
 ENTITY_DATA_PATH = Path("../../workspace/ontology_data/entity.jsonl")
 PRODUCT_DATA_PATH = Path("../../workspace/ontology_data/product.jsonl")
@@ -86,7 +84,7 @@ def ontology_fts():
         f"{graph_import_elapsed_seconds:.3f} seconds"
     )
 
-    connection.execute("LOAD sqlite_fts;")
+    connection.execute("LOAD hybrid_search;")
     index_started_at = time.perf_counter()
     connection.execute(
         "CREATE INDEX entity_description_fts "
@@ -109,7 +107,7 @@ def test_single_column_fts(ontology_fts):
             "MATCH (n:Entity) "
             "RETURN n.uid, n.name, n.description, n.entity_type, "
             "n.product, n.authority, "
-            "sqlite_fts_bm25(n.description, 'MaxCompute') AS score "
+            "bm25(n.description, 'MaxCompute') AS score "
             f"ORDER BY score ASC LIMIT {TOPK};"
         )
     )
@@ -131,7 +129,7 @@ def test_phrase_fts(ontology_fts):
         ontology_fts.execute(
             "MATCH (n:Entity) "
             "RETURN n.uid, n.name, n.description, "
-            "sqlite_fts_bm25(n.description, '\"Flink Connector\"') AS score "
+            "bm25(n.description, '\"Flink Connector\"') AS score "
             f"ORDER BY score ASC LIMIT {TOPK};"
         )
     )
@@ -151,7 +149,7 @@ def test_boolean_expression_fts(ontology_fts):
         ontology_fts.execute(
             "MATCH (n:Entity) "
             "RETURN n.uid, n.name, n.description, "
-            "sqlite_fts_bm25(n.description, 'Flink AND MaxCompute') AS score "
+            "bm25(n.description, 'Flink AND MaxCompute') AS score "
             f"ORDER BY score ASC LIMIT {TOPK};"
         )
     )
@@ -173,7 +171,7 @@ def test_prefix_fts(ontology_fts):
         ontology_fts.execute(
             "MATCH (n:Entity) "
             "RETURN n.uid, n.name, n.description, "
-            "sqlite_fts_bm25(n.description, 'vect*') AS score "
+            "bm25(n.description, 'vect*') AS score "
             f"ORDER BY score ASC LIMIT {TOPK};"
         )
     )
@@ -198,7 +196,7 @@ def test_fts_post_filtering_graph_query(ontology_fts):
         ontology_fts.execute(
             "MATCH (n:Entity) "
             "WITH n, "
-            "sqlite_fts_bm25(n.description, 'MaxCompute') AS score "
+            "bm25(n.description, 'MaxCompute') AS score "
             f"ORDER BY score ASC LIMIT {TOPK} "
             "MATCH (n)-[r:rel_ep]->(p:Product) "
             "RETURN n.uid, n.name, score, p.name AS related_product, "
@@ -223,7 +221,7 @@ def test_fts_pre_filtering(ontology_fts):
             "MATCH (n:Entity) "
             "WHERE n.product = 'Flink' AND n.authority >= 2 "
             "RETURN n.uid, n.name, n.description, n.authority, "
-            "sqlite_fts_bm25(n.description, 'MaxCompute') AS score "
+            "bm25(n.description, 'MaxCompute') AS score "
             f"ORDER BY score ASC LIMIT {TOPK};"
         )
     )
@@ -253,7 +251,7 @@ def test_graph_based_fts_pre_filtering(ontology_fts):
         ontology_fts.execute(
             "MATCH (n:Entity)-[r:rel_ep]->(p:Product {name: 'MaxCompute'}) "
             "RETURN n.uid, n.name, n.description, r.rel_type, r.content, "
-            "sqlite_fts_bm25(n.description, 'Flink') AS score "
+            "bm25(n.description, 'Flink') AS score "
             f"ORDER BY score ASC LIMIT {TOPK};"
         )
     )

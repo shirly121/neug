@@ -6,7 +6,7 @@
 namespace neug::sqlite_fts_ext {
 
 struct SQLiteFTSBM25Function {
-  static constexpr const char* name = "SQLITE_FTS_BM25";
+  static constexpr const char* name = "BM25";
 
   static function::function_set getFunctionSet();
   static Value Exec(const std::vector<Value>& args);

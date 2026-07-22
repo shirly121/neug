@@ -57,7 +57,7 @@ std::filesystem::path GetExecutablePath() {
 std::string FindBuildRoot() {
   auto directory = GetExecutablePath().parent_path();
   const auto extension_path = std::filesystem::path(
-      "extension/sqlite_fts/libsqlite_fts.neug_extension");
+      "extension/hybrid_search/libhybrid_search.neug_extension");
   for (int i = 0; i < 8; ++i) {
     if (std::filesystem::exists(directory / extension_path)) {
       return directory.string();
@@ -81,7 +81,7 @@ TEST(SQLiteFTSExtensionTest, LoadSucceeds) {
   auto connection = database.Connect();
   ASSERT_NE(connection, nullptr);
 
-  auto load = connection->Query("LOAD sqlite_fts;");
+  auto load = connection->Query("LOAD hybrid_search;");
   ASSERT_TRUE(load.has_value()) << load.error().ToString();
 }
 
@@ -188,7 +188,7 @@ TEST(SQLiteFTSExtensionTest, FusedTopKQueryReturnsNodesAndScores) {
   ASSERT_TRUE(database.Open(database_directory.path()));
   auto connection = database.Connect();
   ASSERT_NE(connection, nullptr);
-  ASSERT_TRUE(connection->Query("LOAD sqlite_fts;").has_value());
+  ASSERT_TRUE(connection->Query("LOAD hybrid_search;").has_value());
   ASSERT_TRUE(connection
                   ->Query("CREATE NODE TABLE Item(id INT64 PRIMARY KEY, "
                           "text STRING);")
@@ -204,7 +204,7 @@ TEST(SQLiteFTSExtensionTest, FusedTopKQueryReturnsNodesAndScores) {
 
   auto result = connection->Query(
       "MATCH (n:Item) "
-      "RETURN n.id, sqlite_fts_bm25(n.text, 'search text') AS score "
+      "RETURN n.id, bm25(n.text, 'search text') AS score "
       "ORDER BY score ASC LIMIT 2;");
   ASSERT_TRUE(result.has_value()) << result.error().ToString();
   ASSERT_EQ(result->length(), 2);
@@ -215,7 +215,7 @@ TEST(SQLiteFTSExtensionTest, FusedTopKQueryReturnsNodesAndScores) {
   EXPECT_LE(result->response().arrays(1).double_array().values(1), 0.0);
   auto explain = connection->Query(
       "EXPLAIN MATCH (n:Item) "
-      "RETURN n.id, sqlite_fts_bm25(n.text, 'search text') AS score "
+      "RETURN n.id, bm25(n.text, 'search text') AS score "
       "ORDER BY score ASC LIMIT 2;");
   ASSERT_TRUE(explain.has_value()) << explain.error().ToString();
   const auto plan_text = explain->profile_result_text();
@@ -226,7 +226,7 @@ TEST(SQLiteFTSExtensionTest, FusedTopKQueryReturnsNodesAndScores) {
   const std::vector<std::string> query_literals = {"''", "'   '"};
   for (const auto& query_literal : query_literals) {
     auto recognized = connection->Query(
-        "MATCH (n:Item) RETURN n.id, sqlite_fts_bm25(n.text, " + query_literal +
+        "MATCH (n:Item) RETURN n.id, bm25(n.text, " + query_literal +
         ") AS score ORDER BY score ASC LIMIT 2;");
     EXPECT_TRUE(recognized.has_value())
         << query_literal << ": "
@@ -234,7 +234,7 @@ TEST(SQLiteFTSExtensionTest, FusedTopKQueryReturnsNodesAndScores) {
   }
   auto invalid_match = connection->Query(
       "MATCH (n:Item) RETURN n.id, "
-      "sqlite_fts_bm25(n.text, \"a 'quoted' phrase\") AS score "
+      "bm25(n.text, \"a 'quoted' phrase\") AS score "
       "ORDER BY score ASC LIMIT 2;");
   EXPECT_FALSE(invalid_match.has_value());
 }
@@ -249,7 +249,7 @@ TEST(SQLiteFTSExtensionTest, ReopenPreservesIndexAndAcceptsNewRows) {
     NeugDB database;
     ASSERT_TRUE(database.Open(database_directory.path()));
     auto connection = database.Connect();
-    ASSERT_TRUE(connection->Query("LOAD sqlite_fts;").has_value());
+    ASSERT_TRUE(connection->Query("LOAD hybrid_search;").has_value());
     ASSERT_TRUE(connection
                     ->Query("CREATE NODE TABLE Item(id INT64 PRIMARY KEY, "
                             "text STRING);")
@@ -269,10 +269,10 @@ TEST(SQLiteFTSExtensionTest, ReopenPreservesIndexAndAcceptsNewRows) {
     NeugDB database;
     ASSERT_TRUE(database.Open(database_directory.path()));
     auto connection = database.Connect();
-    ASSERT_TRUE(connection->Query("LOAD sqlite_fts;").has_value());
+    ASSERT_TRUE(connection->Query("LOAD hybrid_search;").has_value());
     auto restored = connection->Query(
         "MATCH (n:Item) RETURN n.id, "
-        "sqlite_fts_bm25(n.text, 'durable') AS score "
+        "bm25(n.text, 'durable') AS score "
         "ORDER BY score ASC LIMIT 10;");
     ASSERT_TRUE(restored.has_value()) << restored.error().ToString();
     ASSERT_EQ(restored->length(), 1);
@@ -283,7 +283,7 @@ TEST(SQLiteFTSExtensionTest, ReopenPreservesIndexAndAcceptsNewRows) {
             .has_value());
     auto appended = connection->Query(
         "MATCH (n:Item) RETURN n.id, "
-        "sqlite_fts_bm25(n.text, 'durable') AS score "
+        "bm25(n.text, 'durable') AS score "
         "ORDER BY score ASC LIMIT 10;");
     ASSERT_TRUE(appended.has_value()) << appended.error().ToString();
     EXPECT_EQ(appended->length(), 2);
@@ -300,7 +300,7 @@ TEST(SQLiteFTSExtensionTest, UnsupportedShapesReturnErrors) {
   ASSERT_TRUE(database.Open(database_directory.path()));
   auto connection = database.Connect();
   ASSERT_NE(connection, nullptr);
-  ASSERT_TRUE(connection->Query("LOAD sqlite_fts;").has_value());
+  ASSERT_TRUE(connection->Query("LOAD hybrid_search;").has_value());
   ASSERT_TRUE(connection
                   ->Query("CREATE NODE TABLE Item(id INT64 PRIMARY KEY, "
                           "text STRING);")
@@ -313,14 +313,14 @@ TEST(SQLiteFTSExtensionTest, UnsupportedShapesReturnErrors) {
                   .has_value());
 
   const std::vector<std::string> unsupported = {
-      "MATCH (n:Item) RETURN sqlite_fts_bm25(n.text, 'alpha');",
-      "MATCH (n:Item) RETURN n.id, sqlite_fts_bm25(n.text, 'alpha') AS "
+      "MATCH (n:Item) RETURN bm25(n.text, 'alpha');",
+      "MATCH (n:Item) RETURN n.id, bm25(n.text, 'alpha') AS "
       "score ORDER BY score DESC LIMIT 1;",
-      "MATCH (n:Item) RETURN n.id, sqlite_fts_bm25(n.text, 'alpha') AS "
+      "MATCH (n:Item) RETURN n.id, bm25(n.text, 'alpha') AS "
       "score ORDER BY score ASC;",
-      "MATCH (n:Item) RETURN n.id, sqlite_fts_bm25(n.text, 'alpha') AS "
+      "MATCH (n:Item) RETURN n.id, bm25(n.text, 'alpha') AS "
       "score LIMIT 1;",
-      "MATCH (n:Item) RETURN n.id, sqlite_fts_bm25(n.text, 'alpha') AS "
+      "MATCH (n:Item) RETURN n.id, bm25(n.text, 'alpha') AS "
       "score ORDER BY score ASC, n.id ASC LIMIT 1;"};
   for (const auto& query : unsupported) {
     auto result = connection->Query(query);
@@ -328,7 +328,7 @@ TEST(SQLiteFTSExtensionTest, UnsupportedShapesReturnErrors) {
   }
 
   auto wrong_type = connection->Query(
-      "MATCH (n:Item) RETURN n.id, sqlite_fts_bm25(n.text, 42) AS score "
+      "MATCH (n:Item) RETURN n.id, bm25(n.text, 42) AS score "
       "ORDER BY score ASC LIMIT 1;");
   EXPECT_FALSE(wrong_type.has_value());
 }
@@ -343,14 +343,14 @@ TEST(SQLiteFTSExtensionTest, MissingIndexReturnsError) {
   ASSERT_TRUE(database.Open(database_directory.path()));
   auto connection = database.Connect();
   ASSERT_NE(connection, nullptr);
-  ASSERT_TRUE(connection->Query("LOAD sqlite_fts;").has_value());
+  ASSERT_TRUE(connection->Query("LOAD hybrid_search;").has_value());
   ASSERT_TRUE(connection
                   ->Query("CREATE NODE TABLE Item(id INT64 PRIMARY KEY, "
                           "text STRING);")
                   .has_value());
   auto result = connection->Query(
       "MATCH (n:Item) "
-      "RETURN n.id, sqlite_fts_bm25(n.text, 'alpha') AS score "
+      "RETURN n.id, bm25(n.text, 'alpha') AS score "
       "ORDER BY score ASC LIMIT 1;");
   ASSERT_FALSE(result.has_value());
   EXPECT_NE(result.error().ToString().find("SQLITE_FTS index not found"),

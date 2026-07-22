@@ -13,13 +13,12 @@ namespace {
 std::unique_ptr<function::FunctionBindData> BindBM25Array(
     const function::ScalarBindFuncInput& input) {
   if (input.arguments.size() != 2) {
-    THROW_BINDER_EXCEPTION("SQLITE_FTS_BM25 requires two arguments");
+    THROW_BINDER_EXCEPTION("BM25 requires two arguments");
   }
   const auto& columns_type = input.arguments[0]->getDataType();
   if (columns_type.id() != DataTypeId::kArray ||
       ArrayType::GetChildType(columns_type).id() != DataTypeId::kVarchar) {
-    THROW_BINDER_EXCEPTION(
-        "SQLITE_FTS_BM25 column list must contain STRING properties");
+    THROW_BINDER_EXCEPTION("BM25 column list must contain STRING properties");
   }
   std::vector<DataType> parameter_types;
   parameter_types.push_back(columns_type.copy());
@@ -45,7 +44,7 @@ function::function_set SQLiteFTSBM25Function::getFunctionSet() {
 
 Value SQLiteFTSBM25Function::Exec(const std::vector<Value>&) {
   THROW_NOT_SUPPORTED_EXCEPTION(
-      "SQLITE_FTS_BM25 is only supported with ORDER BY score ASC and LIMIT");
+      "BM25 is only supported with ORDER BY score ASC and LIMIT");
 }
 
 }  // namespace neug::sqlite_fts_ext

@@ -88,12 +88,13 @@ static Status addVertexIndexData(PropertyGraph& graph, label_t label, vid_t lid,
       std::vector<Value> values;
       for (const auto& property_name :
            index->GetMeta().schema.GetPropertyNames()) {
-        auto id = v_schema->get_property_id(property_name);
-        if (static_cast<size_t>(id) >= props.size()) {
+        auto property_index = v_schema->get_property_index(property_name);
+        if (property_index < 0 ||
+            static_cast<size_t>(property_index) >= props.size()) {
           return Status::InternalError("Indexed property value is missing: " +
                                        property_name);
         }
-        values.push_back(props[id]);
+        values.push_back(props[property_index]);
       }
       RETURN_IF_NOT_OK(index->Upsert(lid, values));
     }

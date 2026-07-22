@@ -1,4 +1,5 @@
 find_package(Git REQUIRED)
+include(${CMAKE_SOURCE_DIR}/cmake/BuildSQLiteAsThirdParty.cmake)
 
 set(ZVEC_SOURCE_DIR
     "${CMAKE_SOURCE_DIR}/third_party/zvec"
@@ -86,13 +87,9 @@ endif()
 if(NOT _zvec_parallel_jobs OR _zvec_parallel_jobs LESS 1)
     set(_zvec_parallel_jobs 1)
 endif()
-if(APPLE)
-    set(_zvec_core_library "${_zvec_binary_dir}/lib/libzvec_core.dylib")
-elseif(WIN32)
-    set(_zvec_core_library "${_zvec_binary_dir}/src/zvec_core.dll")
-else()
-    set(_zvec_core_library "${_zvec_binary_dir}/lib/libzvec_core.so")
-endif()
+set(_zvec_core_library "${_zvec_binary_dir}/lib/libzvec_core.a")
+set(_zvec_ailego_library "${_zvec_binary_dir}/lib/libzvec_ailego.a")
+set(_zvec_turbo_library "${_zvec_binary_dir}/lib/libzvec_turbo.a")
 
 # ZVec currently creates several common third-party targets unconditionally.
 # Build it in an isolated CMake project to avoid collisions with NeuG's gtest,
@@ -100,7 +97,7 @@ endif()
 set(_zvec_cmake_args
     "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-    "-DBUILD_ZVEC_CORE_SHARED=ON"
+    "-DBUILD_ZVEC_CORE_SHARED=OFF"
     "-DBUILD_ZVEC_SHARED=OFF"
     "-DBUILD_ZVEC_AILEGO_SHARED=OFF"
     "-DBUILD_PYTHON_BINDINGS=OFF"
@@ -119,15 +116,25 @@ ExternalProject_Add(zvec_external
     INSTALL_COMMAND ""
     BUILD_COMMAND
         "${CMAKE_COMMAND}" --build <BINARY_DIR>
-        --target zvec_core_shared roaring
+        --target zvec_core zvec_ailego zvec_turbo roaring
         --parallel ${_zvec_parallel_jobs}
       CMAKE_ARGS ${_zvec_cmake_args})
 
-add_library(zvec_core_shared SHARED IMPORTED GLOBAL)
-set_target_properties(zvec_core_shared PROPERTIES
+add_library(zvec_core_static STATIC IMPORTED GLOBAL)
+set_target_properties(zvec_core_static PROPERTIES
     IMPORTED_LOCATION "${_zvec_core_library}"
     INTERFACE_INCLUDE_DIRECTORIES "${ZVEC_SOURCE_DIR}/src/include")
-add_dependencies(zvec_core_shared zvec_external)
+add_dependencies(zvec_core_static zvec_external)
+
+add_library(zvec_ailego_static STATIC IMPORTED GLOBAL)
+set_target_properties(zvec_ailego_static PROPERTIES
+    IMPORTED_LOCATION "${_zvec_ailego_library}")
+add_dependencies(zvec_ailego_static zvec_external)
+
+add_library(zvec_turbo_static STATIC IMPORTED GLOBAL)
+set_target_properties(zvec_turbo_static PROPERTIES
+    IMPORTED_LOCATION "${_zvec_turbo_library}")
+add_dependencies(zvec_turbo_static zvec_external)
 
 add_library(zvec_roaring STATIC IMPORTED GLOBAL)
 set_target_properties(zvec_roaring PROPERTIES
@@ -135,31 +142,63 @@ set_target_properties(zvec_roaring PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${_zvec_roaring_include_dir}")
 add_dependencies(zvec_roaring zvec_external)
 
-set(ZVEC_EXTENSION_OBJECT_FILES
+set(HYBRID_SEARCH_EXTENSION_OBJECT_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/hnsw_index.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/hnsw_index_scan.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/vector_distance_function.cc"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/zvec_extension.cc")
-build_extension_lib("zvec")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/sqlite_fts_function.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/sqlite_fts_index.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/sqlite_fts_index_scan.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/sqlite_fts_sqlite.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/hybrid_search_extension.cc")
+build_extension_lib("hybrid_search")
 
-target_include_directories(neug_zvec_extension PRIVATE
+target_include_directories(neug_hybrid_search_extension PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZVEC_SOURCE_DIR}/src/include)
-target_link_libraries(neug_zvec_extension PRIVATE
+target_link_libraries(neug_hybrid_search_extension PRIVATE
     neug
-    zvec_core_shared
+    zvec_core_static
+    zvec_ailego_static
+    zvec_turbo_static
     zvec_roaring
+    neug_sqlite3
     ${Protobuf_LIBRARIES})
-add_dependencies(neug_zvec_extension zvec_external)
-add_custom_command(TARGET neug_zvec_extension POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        "${_zvec_core_library}"
-        "$<TARGET_FILE_DIR:neug_zvec_extension>"
-    COMMENT "Copying ZVec core library next to the extension")
-
+# ZVec registers metrics and index implementations from static initializers.
+# Force all registration translation units into the extension; a normal static
+# archive scan would discard objects that have no directly referenced symbol.
+if(APPLE)
+    target_link_options(neug_hybrid_search_extension PRIVATE
+        "LINKER:-force_load,$<TARGET_FILE:zvec_core_static>"
+        "LINKER:-force_load,$<TARGET_FILE:zvec_ailego_static>"
+        "LINKER:-force_load,$<TARGET_FILE:zvec_turbo_static>")
+elseif(UNIX)
+    target_link_libraries(neug_hybrid_search_extension PRIVATE
+        -Wl,--whole-archive
+        zvec_core_static
+        zvec_ailego_static
+        zvec_turbo_static
+        -Wl,--no-whole-archive)
+endif()
+add_dependencies(neug_hybrid_search_extension
+    zvec_external
+    neug_sqlite3_amalgamation)
 add_extension_test(
-    NAME zvec
-    TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hnsw_index_test.cc"
+    NAME hybrid_search
+    TEST_SRCS
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/hnsw_index_test.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/sqlite_fts_extension_test.cc"
     EXTRA_INCLUDE_DIRS "${ZVEC_SOURCE_DIR}/src/include"
-    EXTRA_LINK_LIBS zvec_core_shared zvec_roaring)
+    EXTRA_LINK_LIBS
+        zvec_core_static
+        zvec_ailego_static
+        zvec_turbo_static
+        zvec_roaring
+        neug_sqlite3)
+
+if(BUILD_TEST)
+    add_dependencies(hybrid_search_extension_test
+        neug_sqlite3_amalgamation
+        neug_hybrid_search_extension)
+endif()

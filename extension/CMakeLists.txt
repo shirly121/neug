@@ -135,9 +135,7 @@ add_extension_if_enabled("pattern_matching")
 add_extension_if_enabled("gds")
 # Add httpfs extension (S3/OSS + HTTP/HTTPS)
 add_extension_if_enabled("httpfs")
-# Add ZVec-backed vector indexes
-add_extension_if_enabled("zvec")
-# Add SQLite-backed full-text indexes
-add_extension_if_enabled("sqlite_fts")
+# Add vector and full-text indexes for hybrid search
+add_extension_if_enabled("hybrid_search")
 
 message(STATUS "=== Extension configuration complete ===")
