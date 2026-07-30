@@ -97,7 +97,7 @@ VecColumn::VecColumn(std::unique_ptr<ArrayColumn> buffer,
 }
 
 void VecColumn::resize(size_t size) {
-  auto offset_size = offset_accessor_->size();
+  auto offset_size = offset_accessor_->GetNextIndexID();
   auto growth = offset_size + offset_size / 4;
   auto new_size = offset_size < 4096 || size >= growth ? size : growth;
   if (new_size > buffer_->size())
@@ -105,7 +105,7 @@ void VecColumn::resize(size_t size) {
 }
 
 void VecColumn::resize(size_t size, const Value& default_value) {
-  auto offset_size = offset_accessor_->size();
+  auto offset_size = offset_accessor_->GetNextIndexID();
   auto growth = offset_size + offset_size / 4;
   auto new_size = offset_size < 4096 || size >= growth ? size : growth;
   if (new_size > buffer_->size())
