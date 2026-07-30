@@ -92,17 +92,21 @@ int ParsePositive(const common::case_insensitive_map_t<std::string>& options,
 }
 }  // namespace
 
-HNSWVecSource::HNSWVecSource(const ArrayColumn* column, DataTypeId element_type)
-    : column_(column), vector_getter_(nullptr) {
+HNSWVecSource::HNSWVecSource(const void* buffer_ptr, DataTypeId element_type,
+                             size_t dimension)
+    : buffer_ptr_(buffer_ptr), vector_byte_size_(0) {
   if (element_type == DataTypeId::kFloat) {
-    vector_getter_ = &GetVector<float>;
+    vector_byte_size_ = sizeof(float) * dimension;
   } else if (element_type == DataTypeId::kDouble) {
-    vector_getter_ = &GetVector<double>;
+    vector_byte_size_ = sizeof(double) * dimension;
+  } else {
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "HNSW vector source supports only FLOAT or DOUBLE elements");
   }
 }
 
 const void* HNSWVecSource::get_vector(uint32_t node_id) const {
-  return vector_getter_(column_, node_id);
+  return static_cast<const uint8_t*>(buffer_ptr_) + node_id * vector_byte_size_;
 }
 
 ZVecDumpContainer::ZVecDumpContainer(zvec::core_interface::Index* index,
@@ -131,7 +135,9 @@ std::unique_ptr<IDataContainer> ZVecDumpContainer::Fork(Checkpoint&,
 }
 
 HNSWIndex::~HNSWIndex() {
-  if (zvec_index_)
+  // Clone() shares the read-only zvec handle until one of the copies is
+  // detached. Closing a shared handle here would invalidate the other clone.
+  if (zvec_index_ && zvec_index_.use_count() == 1)
     zvec_index_->Close();
 }
 
@@ -257,12 +263,13 @@ Status HNSWIndex::Rebind(const IndexBindContext& context) {
     return Status(StatusCode::ERR_INVALID_ARGUMENT,
                   "HNSWIndex requires a bound VecColumn offset accessor");
   }
-  auto* array_column = column->get_buffer();
-  if (!array_column) {
+  auto* buffer_ptr = column->get_buffer_ptr();
+  if (!buffer_ptr) {
     return Status(StatusCode::ERR_INVALID_ARGUMENT,
-                  "HNSWIndex requires a bound ArrayColumn buffer");
+                  "HNSWIndex requires a bound vector buffer");
   }
-  vec_source_ = std::make_unique<HNSWVecSource>(array_column, element_type);
+  vec_source_ =
+      std::make_unique<HNSWVecSource>(buffer_ptr, element_type, dimension_);
   auto* vec_accessor =
       dynamic_cast<VecIndexIDAccessor*>(index_id_accessor_.get());
   if (vec_accessor) {
@@ -273,12 +280,32 @@ Status HNSWIndex::Rebind(const IndexBindContext& context) {
   return Status::OK();
 }
 
-void HNSWIndex::Detach(Checkpoint&, MemoryLevel) {
-  THROW_NOT_SUPPORTED_EXCEPTION("HNSWIndex does not support Detach");
+void HNSWIndex::Detach(Checkpoint& ckp, MemoryLevel level) {
+  if (index_id_accessor_) {
+    index_id_accessor_->Detach(ckp, level);
+  }
 }
 
 std::unique_ptr<Module> HNSWIndex::Clone() const {
-  THROW_NOT_SUPPORTED_EXCEPTION("HNSWIndex does not support Clone");
+  auto cloned = std::make_unique<HNSWIndex>();
+  if (meta_) {
+    cloned->meta_ = std::make_unique<IndexMeta>(*meta_);
+  }
+  if (index_id_accessor_) {
+    auto accessor = index_id_accessor_->Clone();
+    cloned->index_id_accessor_.reset(
+        static_cast<IndexIDAccessor*>(accessor.release()));
+  }
+  cloned->zvec_index_ = zvec_index_;
+  if (vec_source_) {
+    cloned->vec_source_ = std::make_unique<HNSWVecSource>(*vec_source_);
+  }
+  cloned->zvec_runtime_path_ = zvec_runtime_path_;
+  cloned->dimension_ = dimension_;
+  cloned->m_ = m_;
+  cloned->ef_construction_ = ef_construction_;
+  cloned->metric_ = metric_;
+  return cloned;
 }
 
 result<std::vector<index_id_t>> HNSWIndex::SearchImpl(

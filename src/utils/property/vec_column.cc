@@ -13,14 +13,77 @@ constexpr const char* kBufferRef = "buffer";
 constexpr const char* kAccessorRef = "offset_accessor";
 }  // namespace
 
+VecColumnBuffer::VecColumnBuffer(std::unique_ptr<ArrayColumn> buffer)
+    : buffer_(std::move(buffer)) {
+  if (!buffer_) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("VecColumnBuffer requires an ArrayColumn");
+  }
+}
+
+size_t VecColumnBuffer::size() const {
+  std::shared_lock lock(mutex_);
+  return buffer_->size();
+}
+
+void VecColumnBuffer::resize(size_t size) {
+  std::unique_lock lock(mutex_);
+  buffer_->resize(size);
+}
+
+void VecColumnBuffer::resize(size_t size, const Value& default_value) {
+  std::unique_lock lock(mutex_);
+  buffer_->resize(size, default_value);
+}
+
+Value VecColumnBuffer::get_any(size_t index) const {
+  std::shared_lock lock(mutex_);
+  return buffer_->get_any(index);
+}
+
+void VecColumnBuffer::set_any(size_t index, const Value& value,
+                              bool insert_safe) {
+  std::shared_lock lock(mutex_);
+  buffer_->set_any(index, value, insert_safe);
+}
+
+const void* VecColumnBuffer::get_buffer_ptr() const {
+  std::shared_lock lock(mutex_);
+  return buffer_->get_buffer_ptr();
+}
+
+void VecColumnBuffer::ingest(uint32_t index, OutArchive& arc) {
+  std::shared_lock lock(mutex_);
+  buffer_->ingest(index, arc);
+}
+
+void VecColumnBuffer::Open(Checkpoint& ckp, const ModuleDescriptor& desc,
+                           MemoryLevel level) {
+  std::unique_lock lock(mutex_);
+  buffer_->Open(ckp, desc, level);
+}
+
+void VecColumnBuffer::Open(Checkpoint& ckp, const CheckpointManifest& manifest,
+                           const ModuleDescriptor& desc, MemoryLevel level) {
+  std::unique_lock lock(mutex_);
+  buffer_->Open(ckp, manifest, desc, level);
+}
+
+void VecColumnBuffer::Dump(Checkpoint& ckp, CheckpointManifest& manifest,
+                           const std::string& key) {
+  std::shared_lock lock(mutex_);
+  buffer_->Dump(ckp, manifest, key);
+}
+
 VecColumn::VecColumn()
     : offset_accessor_(std::make_unique<DefaultIndexIDAccessor>()),
-      buffer_(std::make_shared<ArrayColumn>()) {}
+      buffer_(
+          std::make_shared<VecColumnBuffer>(std::make_unique<ArrayColumn>())) {}
 
-VecColumn::VecColumn(std::shared_ptr<ArrayColumn> buffer,
+VecColumn::VecColumn(std::unique_ptr<ArrayColumn> buffer,
                      std::unique_ptr<IndexIDAccessor> accessor, size_t vid_size)
-    : offset_accessor_(std::move(accessor)), buffer_(std::move(buffer)) {
-  if (!buffer_ || !offset_accessor_) {
+    : offset_accessor_(std::move(accessor)),
+      buffer_(std::make_shared<VecColumnBuffer>(std::move(buffer))) {
+  if (!offset_accessor_) {
     THROW_INVALID_ARGUMENT_EXCEPTION(
         "VecColumn requires a buffer and an offset accessor");
   }

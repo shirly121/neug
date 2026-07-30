@@ -1,16 +1,49 @@
 #pragma once
 
 #include <memory>
+#include <shared_mutex>
 
 #include "neug/storages/index/index_id_accessor.h"
 #include "neug/utils/property/array_column.h"
 
 namespace neug {
 
+/**
+ * @brief Thread-safe shared storage for VecColumn clones.
+ *
+ * Reads and in-place updates may proceed concurrently. Resizing takes the
+ * exclusive lock because it can replace the ArrayColumn's underlying storage
+ * and invalidate an in-flight read or update.
+ */
+class VecColumnBuffer {
+ public:
+  explicit VecColumnBuffer(std::unique_ptr<ArrayColumn> buffer);
+
+  size_t size() const;
+  void resize(size_t size);
+  void resize(size_t size, const Value& default_value);
+  Value get_any(size_t index) const;
+  void set_any(size_t index, const Value& value, bool insert_safe);
+  const void* get_buffer_ptr() const;
+  void ingest(uint32_t index, OutArchive& arc);
+
+  void Open(Checkpoint& ckp, const ModuleDescriptor& desc, MemoryLevel level);
+  void Open(Checkpoint& ckp, const CheckpointManifest& manifest,
+            const ModuleDescriptor& desc, MemoryLevel level);
+  void Dump(Checkpoint& ckp, CheckpointManifest& manifest,
+            const std::string& key);
+
+  const ArrayColumn* array_column() const { return buffer_.get(); }
+
+ private:
+  mutable std::shared_mutex mutex_;
+  std::unique_ptr<ArrayColumn> buffer_;
+};
+
 class VecColumn : public ColumnBase {
  public:
   VecColumn();
-  VecColumn(std::shared_ptr<ArrayColumn> buffer,
+  VecColumn(std::unique_ptr<ArrayColumn> buffer,
             std::unique_ptr<IndexIDAccessor> accessor, size_t vid_size);
 
   void Open(Checkpoint&, const ModuleDescriptor&, MemoryLevel) override;
@@ -30,7 +63,8 @@ class VecColumn : public ColumnBase {
   IndexIDAccessor* get_offset_accessor() const {
     return offset_accessor_.get();
   }
-  const ArrayColumn* get_buffer() const { return buffer_.get(); }
+  const ArrayColumn* get_buffer() const { return buffer_->array_column(); }
+  const void* get_buffer_ptr() const { return buffer_->get_buffer_ptr(); }
   std::unique_ptr<Module> Clone() const override;
   void Detach(Checkpoint&, MemoryLevel) override;
   std::string ModuleTypeName() const override { return type_name(); }
@@ -42,7 +76,7 @@ class VecColumn : public ColumnBase {
   void checkOffset(index_id_t offset, const char* operation) const;
 
   std::unique_ptr<IndexIDAccessor> offset_accessor_;
-  std::shared_ptr<ArrayColumn> buffer_;
+  std::shared_ptr<VecColumnBuffer> buffer_;
 };
 
 class VecRefColumn : public RefColumnBase {

@@ -53,6 +53,19 @@ ArrayColumn::ArrayColumn(const DataType& array_type)
   child_column_ = CreateColumn(child_type);
 }
 
+const void* ArrayColumn::get_buffer_ptr() const {
+  auto child_type = ArrayType::GetChildType(array_type_).id();
+  if (child_type == DataTypeId::kFloat) {
+    return static_cast<const FloatColumn*>(child_column_.get())->data();
+  }
+  if (child_type == DataTypeId::kDouble) {
+    return static_cast<const DoubleColumn*>(child_column_.get())->data();
+  }
+  THROW_INVALID_ARGUMENT_EXCEPTION(
+      "ArrayColumn buffer pointer is supported only for FLOAT or DOUBLE "
+      "elements");
+}
+
 void ArrayColumn::Open(Checkpoint& ckp, const ModuleDescriptor& desc,
                        MemoryLevel level) {
   openInternal(ckp, nullptr, desc, level);

@@ -38,7 +38,7 @@ ColumnBase* VertexTable::UpgradeVecColumn(size_t col) {
                                      " is not an ArrayColumn");
   }
   auto owned = table_->TakeColumn(static_cast<int>(col));
-  std::shared_ptr<ArrayColumn> buffer(
+  std::unique_ptr<ArrayColumn> buffer(
       static_cast<ArrayColumn*>(owned.release()));
   if (!ckp_) {
     THROW_RUNTIME_ERROR(

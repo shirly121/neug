@@ -76,6 +76,10 @@ class ArrayColumn : public ColumnBase {
 
  private:
   friend class VecColumn;
+  friend class VecColumnBuffer;
+
+  const void* get_buffer_ptr() const;
+
   void setLogicalSize(size_t size) { size_ = size; }
 
   void openInternal(Checkpoint& ckp, const CheckpointManifest* manifest,

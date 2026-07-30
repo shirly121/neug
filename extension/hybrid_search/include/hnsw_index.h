@@ -29,20 +29,14 @@ struct HNSWIndexQueryParams final : IndexQueryParams {
 
 class HNSWVecSource final : public zvec::core::VectorSource {
  public:
-  HNSWVecSource(const ArrayColumn* column, DataTypeId element_type);
+  HNSWVecSource(const void* buffer_ptr, DataTypeId element_type,
+                size_t dimension);
 
   const void* get_vector(uint32_t node_id) const override;
 
  private:
-  using VectorGetter = const void* (*) (const ArrayColumn*, uint32_t);
-
-  template <typename T>
-  static const void* GetVector(const ArrayColumn* column, uint32_t node_id) {
-    return column->get_row_ptr<T>(node_id);
-  }
-
-  const ArrayColumn* column_;
-  VectorGetter vector_getter_;
+  const void* buffer_ptr_;
+  size_t vector_byte_size_;
 };
 
 class ZVecDumpContainer final : public IDataContainer {

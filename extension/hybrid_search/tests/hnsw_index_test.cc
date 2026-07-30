@@ -81,7 +81,7 @@ Value MakeVectorValue(int dimension, float value) {
 std::unique_ptr<VecColumn> MakeVecColumn(Checkpoint& checkpoint, int dimension,
                                          size_t size) {
   auto type = DataType::Array(DataType::FLOAT, dimension);
-  auto buffer = std::make_shared<ArrayColumn>(type);
+  auto buffer = std::make_unique<ArrayColumn>(type);
   buffer->Open(checkpoint, ModuleDescriptor{}, MemoryLevel::kInMemory);
   auto accessor = std::make_unique<DefaultIndexIDAccessor>();
   accessor->Open(checkpoint, ModuleDescriptor{}, MemoryLevel::kInMemory);
@@ -286,6 +286,39 @@ TEST_F(HNSWIndexLifecycleTest, OpenDumpReopenAppendDumpSearch) {
     ASSERT_FALSE(results.empty());
     EXPECT_EQ(results[0], 2u);
   }
+}
+
+TEST_F(HNSWIndexLifecycleTest, CloneDetachIsolatesZVecWrites) {
+  constexpr vid_t kOriginalCount = 8;
+  auto column = MakeVecColumn(*checkpoint_, kDimension, kOriginalCount + 1);
+  auto index = MakeIndex(*checkpoint_, MakeHNSWMeta("clone_detach", kDimension),
+                         ModuleDescriptor{}, *column);
+  for (vid_t vid = 0; vid < kOriginalCount; ++vid) {
+    Append(*index, *column, vid, kDimension, static_cast<float>(vid));
+  }
+
+  auto cloned_module = index->Clone();
+  auto clone = std::unique_ptr<HNSWIndex>(
+      static_cast<HNSWIndex*>(cloned_module.release()));
+  clone->Detach(*checkpoint_, MemoryLevel::kInMemory);
+  auto status = clone->Rebind(IndexBindContext{column.get()});
+  ASSERT_TRUE(status.ok()) << status.error_message();
+
+  Append(*clone, *column, kOriginalCount, kDimension, 100.0f);
+  auto clone_results = Search(*clone, kDimension, 100.0f, 1);
+  ASSERT_EQ(clone_results.size(), 1u);
+  EXPECT_EQ(clone_results[0], kOriginalCount);
+
+  auto original_results = Search(*index, kDimension, 100.0f, 1);
+  ASSERT_EQ(original_results.size(), 1u);
+  EXPECT_NE(original_results[0], kOriginalCount);
+
+  // Destroying one side of a shallow clone must not close the other's shared
+  // zvec handle.
+  index.reset();
+  clone_results = Search(*clone, kDimension, 100.0f, 1);
+  ASSERT_EQ(clone_results.size(), 1u);
+  EXPECT_EQ(clone_results[0], kOriginalCount);
 }
 
 class HNSWIndexAdvancedTest : public ::testing::Test {

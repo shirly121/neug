@@ -14,9 +14,11 @@
  */
 
 #include <gtest/gtest.h>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <thread>
 
 #include "neug/storages/checkpoint.h"
 #include "neug/storages/checkpoint_manager.h"
@@ -391,7 +393,7 @@ TEST(VecColumnTest, AccessUpdateAndDumpOpen) {
   auto ckp = make_checkpoint(checkpoint_mgr);
 
   auto array_type = DataType::Array(DataType::FLOAT, 2);
-  auto buffer = std::make_shared<ArrayColumn>(array_type);
+  auto buffer = std::make_unique<ArrayColumn>(array_type);
   buffer->Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
   buffer->resize(2);
   auto array = [&](float first, float second) {
@@ -403,7 +405,7 @@ TEST(VecColumnTest, AccessUpdateAndDumpOpen) {
 
   auto accessor = std::make_unique<DefaultIndexIDAccessor>();
   accessor->Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
-  VecColumn column(buffer, std::move(accessor), 2);
+  VecColumn column(std::move(buffer), std::move(accessor), 2);
   EXPECT_EQ(column.size(), 2);
   EXPECT_EQ(column.get_offset(0), 0);
   EXPECT_FLOAT_EQ(
@@ -426,6 +428,57 @@ TEST(VecColumnTest, AccessUpdateAndDumpOpen) {
   EXPECT_FLOAT_EQ(
       ArrayValue::GetChildren(reopened.get_any(0))[0].GetValue<float>(), 5);
 
+  std::filesystem::remove_all(temp_dir);
+}
+
+TEST(VecColumnTest, SharedBufferSupportsConcurrentResizeAndRead) {
+  auto temp_dir =
+      std::filesystem::temp_directory_path() /
+      ("vec_column_concurrency_" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir);
+  CheckpointManager checkpoint_mgr;
+  checkpoint_mgr.Open(temp_dir.string());
+  auto ckp = make_checkpoint(checkpoint_mgr);
+
+  auto array_type = DataType::Array(DataType::FLOAT, 2);
+  auto array =
+      Value::ARRAY(array_type, {Value::FLOAT(1.0f), Value::FLOAT(2.0f)});
+  auto buffer = std::make_unique<ArrayColumn>(array_type);
+  buffer->Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  buffer->resize(1);
+  buffer->set_any(0, array, true);
+  auto accessor = std::make_unique<DefaultIndexIDAccessor>();
+  accessor->Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  VecColumn column(std::move(buffer), std::move(accessor), 1);
+
+  auto cloned_module = column.Clone();
+  auto clone = std::unique_ptr<VecColumn>(
+      static_cast<VecColumn*>(cloned_module.release()));
+  std::atomic<bool> stop{false};
+  std::atomic<bool> read_failed{false};
+  std::thread reader([&] {
+    while (!stop.load(std::memory_order_acquire)) {
+      auto value = clone->get_any(0);
+      const auto& children = ArrayValue::GetChildren(value);
+      if (children.size() != 2 || children[0].GetValue<float>() != 1.0f ||
+          children[1].GetValue<float>() != 2.0f) {
+        read_failed.store(true, std::memory_order_relaxed);
+        break;
+      }
+    }
+  });
+  for (size_t size = 2; size < 256; ++size) {
+    column.resize(size);
+  }
+  stop.store(true, std::memory_order_release);
+  reader.join();
+
+  EXPECT_FALSE(read_failed.load(std::memory_order_relaxed));
+  EXPECT_EQ(column.size(), 255u);
+  EXPECT_EQ(clone->size(), 255u);
   std::filesystem::remove_all(temp_dir);
 }
 
