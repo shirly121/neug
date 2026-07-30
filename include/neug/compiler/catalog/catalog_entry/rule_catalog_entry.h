@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -25,15 +26,18 @@ namespace neug::catalog {
 
 class NEUG_API RuleCatalogEntry final : public CatalogEntry {
  public:
-  RuleCatalogEntry(std::string name,
-                   std::unique_ptr<optimizer::LogicalRule> rule)
-      : CatalogEntry{CatalogEntryType::RULE_ENTRY, std::move(name)},
-        planRule{std::move(rule)} {}
+  using RuleFactory = std::function<std::unique_ptr<optimizer::LogicalRule>()>;
 
-  optimizer::LogicalRule* getRule() const { return planRule.get(); }
+  RuleCatalogEntry(std::string name, RuleFactory ruleFactory)
+      : CatalogEntry{CatalogEntryType::RULE_ENTRY, std::move(name)},
+        ruleFactory{std::move(ruleFactory)} {}
+
+  std::unique_ptr<optimizer::LogicalRule> createRule() const {
+    return ruleFactory();
+  }
 
  private:
-  std::unique_ptr<optimizer::LogicalRule> planRule;
+  RuleFactory ruleFactory;
 };
 
 }  // namespace neug::catalog

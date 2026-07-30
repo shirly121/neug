@@ -405,9 +405,9 @@ bool Catalog::containsRule(const Transaction* transaction,
 }
 
 void Catalog::addRule(Transaction* transaction, std::string name,
-                      std::unique_ptr<optimizer::LogicalRule> rule) {
+                      RuleCatalogEntry::RuleFactory ruleFactory) {
   rules->createEntry(transaction, std::make_unique<RuleCatalogEntry>(
-                                      std::move(name), std::move(rule)));
+                                      std::move(name), std::move(ruleFactory)));
 }
 
 std::vector<RuleCatalogEntry*> Catalog::getRuleEntries(

@@ -25,6 +25,7 @@
 #include <memory>
 
 #include "neug/compiler/catalog/catalog_entry/function_catalog_entry.h"
+#include "neug/compiler/catalog/catalog_entry/rule_catalog_entry.h"
 #include "neug/compiler/catalog/catalog_set.h"
 #include "neug/compiler/common/cast.h"
 #include "neug/compiler/function/function.h"
@@ -71,7 +72,6 @@ class LogicalRule;
 
 namespace catalog {
 class FunctionCatalogEntry;
-class RuleCatalogEntry;
 class SequenceCatalogEntry;
 class IndexCatalogEntry;
 
@@ -157,7 +157,7 @@ class NEUG_API Catalog {
   bool containsRule(const transaction::Transaction* transaction,
                     const std::string& name) const;
   void addRule(transaction::Transaction* transaction, std::string name,
-               std::unique_ptr<optimizer::LogicalRule> rule);
+               RuleCatalogEntry::RuleFactory ruleFactory);
   std::vector<RuleCatalogEntry*> getRuleEntries(
       const transaction::Transaction* transaction) const;
 

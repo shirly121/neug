@@ -6,6 +6,7 @@
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -188,16 +189,21 @@ def ontology_graph(tmp_path_factory):
             f"CREATE REL TABLE {name}(FROM {source} TO {target}, "
             "rel_type STRING, content STRING);"
         )
+    import_timings = {}
+    started = time.perf_counter()
     conn.execute(
         f'COPY Entity FROM (LOAD FROM "{entity_path}" '
         "RETURN uid, name, description, entity_type, product, authority, "
         "kg_id, CAST(embedding, 'FLOAT[512]'))"
     )
+    import_timings["Entity"] = time.perf_counter() - started
 
+    started = time.perf_counter()
     conn.execute(
         f'COPY Product FROM (LOAD FROM "{split_paths["Product"]}" '
         "RETURN name, uid, description);"
     )
+    import_timings["Product"] = time.perf_counter() - started
     relation_labels = {
         "rel_ee": ("Entity", "Entity"),
         "rel_ep": ("Entity", "Product"),
@@ -208,24 +214,41 @@ def ontology_graph(tmp_path_factory):
         path = split_paths[name]
         if path.stat().st_size == 0:
             continue
+        started = time.perf_counter()
         conn.execute(
             f'COPY {name} FROM (LOAD FROM "{path}" '
             "RETURN source, target, rel_type, content) "
             f'(from="{source}", to="{target}");'
         )
+        import_timings[name] = time.perf_counter() - started
+
+    index_timings = {}
+    started = time.perf_counter()
     conn.execute(
         "CREATE INDEX entity_embedding_hnsw ON Entity USING HNSW (embedding) "
         "WITH (metric = 'ip', m = 16, ef_construction = 200);"
     )
+    index_timings["entity_embedding_hnsw"] = time.perf_counter() - started
+    started = time.perf_counter()
     conn.execute(
         "CREATE INDEX entity_description_fts "
         "ON Entity USING SQLITE_FTS (description);"
     )
+    index_timings["entity_description_fts"] = time.perf_counter() - started
+    started = time.perf_counter()
     conn.execute(
         "CREATE INDEX entity_text_fts "
         "ON Entity USING SQLITE_FTS (name, description) "
         "WITH (name_weight = 8.0, description_weight = 2.0);"
     )
+    index_timings["entity_text_fts"] = time.perf_counter() - started
+
+    for name, elapsed in import_timings.items():
+        print(f"[ontology timing] import {name}: {elapsed:.3f}s")
+    print(f"[ontology timing] import total: {sum(import_timings.values()):.3f}s")
+    for name, elapsed in index_timings.items():
+        print(f"[ontology timing] create index {name}: {elapsed:.3f}s")
+    print(f"[ontology timing] create indexes total: {sum(index_timings.values()):.3f}s")
 
     yield {
         "connection": conn,

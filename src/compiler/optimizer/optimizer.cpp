@@ -70,7 +70,8 @@ void Optimizer::optimize(
 
     for (auto* entry :
          context->getCatalog()->getRuleEntries(context->getTransaction())) {
-      entry->getRule()->rewrite(context, plan);
+      auto rule = entry->createRule();
+      rule->rewrite(context, plan);
     }
 
     auto filterPushDownOptimizer = FilterPushDownOptimizer(context);
@@ -136,7 +137,7 @@ void Optimizer::optimize(
     auto catalog = context->getCatalog();
     for (auto& rule_entry :
          catalog->getRuleEntries(context->getTransaction())) {
-      auto rule = rule_entry->getRule();
+      auto rule = rule_entry->createRule();
       if (rule) {
         rule->rewrite(context, plan);
       }

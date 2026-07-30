@@ -83,7 +83,7 @@ class ExtensionAPI {
       return;
     }
     catalog->addRule(&neug::transaction::DUMMY_TRANSACTION, T::name,
-                     std::make_unique<T>());
+                     []() { return std::make_unique<T>(); });
   }
 
   static void registerExtension(const ExtensionInfo& info);
