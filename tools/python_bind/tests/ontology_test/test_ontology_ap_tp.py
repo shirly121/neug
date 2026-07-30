@@ -94,15 +94,6 @@ def test_ap_tp_vector_index_roundtrip(tmp_path, unused_tcp_port):
         "query_vector": query_vector,
     }
     try:
-        # The TP database owns a new compiler catalog, so initialize the
-        # extension against that catalog before issuing index-backed queries.
-        list(
-            write_session.execute(
-                "LOAD hybrid_search;",
-                access_mode="update",
-            )
-        )
-
         # Plain vector similarity search.
         rows = list(
             query_session.execute(
