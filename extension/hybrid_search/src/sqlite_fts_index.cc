@@ -37,6 +37,30 @@ std::string ToLower(std::string value) {
   return value;
 }
 
+std::string EnhanceFTS5Error(const std::string& query,
+                             const std::string& error) {
+  static const std::regex kSyntaxErrorPattern(
+      R"fts(fts5: syntax error near "([^"]+)")fts");
+  std::smatch match;
+  if (!std::regex_search(error, match, kSyntaxErrorPattern) ||
+      match.size() < 2 || match.str(1).empty()) {
+    return error;
+  }
+
+  const auto character = match.str(1);
+  const auto position = query.find(character);
+  std::string enhanced = error +
+                         ". FTS5 query cannot parse the unquoted character '" +
+                         character + "'";
+  if (position != std::string::npos) {
+    enhanced += " at position " + std::to_string(position);
+  }
+  enhanced +=
+      "; wrap the query in double quotes to form a phrase or escape the "
+      "character";
+  return enhanced;
+}
+
 std::string ValidateTokenizer(const std::string& tokenizer) {
   static const std::unordered_set<std::string> kSupported = {
       "unicode61", "ascii", "porter", "porter unicode61", "trigram"};
@@ -410,7 +434,8 @@ SQLiteFTSIndex::QueryCandidates(const SQLiteFTSQueryParams& params) {
   } catch (const std::exception& error) {
     RETURN_STATUS_ERROR(
         StatusCode::ERR_INVALID_ARGUMENT,
-        "SQLITE_FTS query failed: " + std::string(error.what()));
+        "SQLITE_FTS query failed: " +
+            EnhanceFTS5Error(params.query_string, error.what()));
   }
 }
 

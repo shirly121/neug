@@ -154,11 +154,23 @@ TEST(SQLiteFTSIndexTest, RankedSearchSupportsWordsPhrasesAndPrefixes) {
     }
   }
 
-  auto invalid = MakeQuery("unterminated\"");
-  auto invalid_result = index->RankedSearch(invalid);
-  EXPECT_FALSE(invalid_result.has_value());
-  EXPECT_NE(invalid_result.error().ToString().find("SQLITE_FTS query failed"),
+  auto unterminated_quote = index->RankedSearch(MakeQuery("unterminated\""));
+  ASSERT_FALSE(unterminated_quote.has_value());
+  EXPECT_NE(
+      unterminated_quote.error().ToString().find("SQLITE_FTS query failed"),
+      std::string::npos);
+
+  auto dotted = index->RankedSearch(MakeQuery("quick.brown"));
+  ASSERT_FALSE(dotted.has_value());
+  const auto dotted_error = dotted.error().ToString();
+  EXPECT_NE(dotted_error.find("SQLITE_FTS query failed"), std::string::npos);
+  EXPECT_NE(dotted_error.find("unquoted character '.'"), std::string::npos);
+  EXPECT_NE(dotted_error.find("position 5"), std::string::npos);
+  EXPECT_NE(dotted_error.find(
+                "wrap the query in double quotes to form a phrase or escape "
+                "the character"),
             std::string::npos);
+  EXPECT_EQ(dotted_error.find("example:"), std::string::npos);
 }
 
 TEST(SQLiteFTSIndexTest, BulkBuildCommitsInsertedRows) {
