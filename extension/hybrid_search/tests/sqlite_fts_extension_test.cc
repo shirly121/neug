@@ -4,6 +4,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -449,13 +450,61 @@ TEST(SQLiteFTSIndexTest, FiltersSupersededAndDeletedRowsWithScores) {
   EXPECT_LE(current->front().score, 0.0);
 }
 
-TEST(SQLiteFTSIndexTest, CopyOnWriteLifecycleIsNotSupported) {
+TEST(SQLiteFTSIndexTest, CloneDetachIsolatesVisibilityAndSharesDatabase) {
   TemporaryDatabaseDirectory directory;
   auto checkpoint = Checkpoint::Open(directory.path().string(), 0);
-  SQLiteFTSIndex index;
+  auto index = MakeOpenedIndex(*checkpoint);
+  ASSERT_TRUE(index->Upsert(7, Value::STRING("shared original")).ok());
 
-  EXPECT_ANY_THROW(index.Clone());
-  EXPECT_ANY_THROW(index.Detach(*checkpoint, MemoryLevel::kInMemory));
+  auto cloned_module = index->Clone();
+  auto clone = std::unique_ptr<SQLiteFTSIndex>(
+      static_cast<SQLiteFTSIndex*>(cloned_module.release()));
+  clone->Detach(*checkpoint, MemoryLevel::kInMemory);
+
+  ASSERT_TRUE(clone->Upsert(8, Value::STRING("clone only")).ok());
+  auto clone_only = clone->RankedSearch(MakeQuery("clone"));
+  ASSERT_TRUE(clone_only.has_value()) << clone_only.error().ToString();
+  ASSERT_EQ(clone_only->size(), 1u);
+  EXPECT_EQ(clone_only->front().vid, 8u);
+
+  auto original_clone_query = index->RankedSearch(MakeQuery("clone"));
+  ASSERT_TRUE(original_clone_query.has_value())
+      << original_clone_query.error().ToString();
+  EXPECT_TRUE(original_clone_query->empty());
+
+  ASSERT_TRUE(index->Upsert(9, Value::STRING("original only")).ok());
+  auto original_only = index->RankedSearch(MakeQuery("original"));
+  ASSERT_TRUE(original_only.has_value()) << original_only.error().ToString();
+  ASSERT_EQ(original_only->size(), 2u);
+  std::unordered_set<vid_t> original_vids;
+  for (const auto& result : *original_only) {
+    original_vids.insert(result.vid);
+  }
+  EXPECT_EQ(original_vids, (std::unordered_set<vid_t>{7u, 9u}));
+
+  auto clone_original_query = clone->RankedSearch(MakeQuery("original"));
+  ASSERT_TRUE(clone_original_query.has_value())
+      << clone_original_query.error().ToString();
+  ASSERT_EQ(clone_original_query->size(), 1u);
+  EXPECT_EQ(clone_original_query->front().vid, 7u);
+
+  ASSERT_TRUE(clone->Delete(7).ok());
+  auto clone_after_delete = clone->RankedSearch(MakeQuery("shared"));
+  ASSERT_TRUE(clone_after_delete.has_value())
+      << clone_after_delete.error().ToString();
+  EXPECT_TRUE(clone_after_delete->empty());
+  auto original_after_clone_delete = index->RankedSearch(MakeQuery("shared"));
+  ASSERT_TRUE(original_after_clone_delete.has_value())
+      << original_after_clone_delete.error().ToString();
+  ASSERT_EQ(original_after_clone_delete->size(), 1u);
+  EXPECT_EQ(original_after_clone_delete->front().vid, 7u);
+
+  // Destroying one side must not close the SQLite connection shared by clones.
+  index.reset();
+  clone_only = clone->RankedSearch(MakeQuery("clone"));
+  ASSERT_TRUE(clone_only.has_value()) << clone_only.error().ToString();
+  ASSERT_EQ(clone_only->size(), 1u);
+  EXPECT_EQ(clone_only->front().vid, 8u);
 }
 
 TEST(SQLiteFTSIndexTest, EmptyIndexOpenAndDump) {

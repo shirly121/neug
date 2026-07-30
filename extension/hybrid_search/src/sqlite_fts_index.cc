@@ -111,8 +111,8 @@ std::string ValidatePrefix(const std::string& prefix) {
 
 }  // namespace
 
-SQLiteFTSDumpContainer::SQLiteFTSDumpContainer(SQLiteDatabase* database,
-                                               std::string runtime_path)
+SQLiteFTSDumpContainer::SQLiteFTSDumpContainer(
+    std::shared_ptr<SQLiteDatabase> database, std::string runtime_path)
     : database_(database), runtime_path_(std::move(runtime_path)) {}
 
 void SQLiteFTSDumpContainer::Sync() {
@@ -136,7 +136,7 @@ std::unique_ptr<IDataContainer> SQLiteFTSDumpContainer::Fork(Checkpoint&,
   THROW_NOT_SUPPORTED_EXCEPTION("SQLiteFTSDumpContainer does not support Fork");
 }
 
-SQLiteFTSIndex::~SQLiteFTSIndex() { database_.Close(); }
+SQLiteFTSIndex::~SQLiteFTSIndex() = default;
 
 void SQLiteFTSIndex::ParseOptions() {
   if (!meta_) {
@@ -252,11 +252,11 @@ void SQLiteFTSIndex::CreateTable() {
     sql += ", prefix='" + prefix_ + "'";
   }
   sql += ", detail=" + detail_ + ");";
-  database_.Execute(sql);
+  database_->Execute(sql);
 }
 
 void SQLiteFTSIndex::ValidateExistingTable() {
-  auto statement = database_.Prepare(
+  auto statement = database_->Prepare(
       "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 "
       "AND sql LIKE '%USING fts5(%';");
   statement.BindText(1, table_name_);
@@ -307,18 +307,19 @@ void SQLiteFTSIndex::OpenInternal(Checkpoint& ckp,
   auto index_path = descriptor.get_path(kIndexFilePath);
   bool has_existing = index_path && !index_path->empty() &&
                       std::filesystem::exists(*index_path);
+  database_ = std::make_shared<SQLiteDatabase>();
   try {
     if (has_existing) {
       file_utils::copy_file(*index_path, runtime_path_, true);
     }
-    database_.Open(runtime_path_);
+    database_->Open(runtime_path_);
     if (has_existing) {
       ValidateExistingTable();
     } else {
       CreateTable();
     }
   } catch (...) {
-    database_.Close();
+    database_->Close();
     std::error_code error;
     std::filesystem::remove(runtime_path_, error);
     runtime_path_.clear();
@@ -331,7 +332,7 @@ void SQLiteFTSIndex::Dump(Checkpoint& ckp, CheckpointManifest& manifest,
   if (key.empty()) {
     THROW_RUNTIME_ERROR("SQLiteFTSIndex::Dump: module key must not be empty");
   }
-  if (!database_.IsOpen()) {
+  if (!database_ || !database_->IsOpen()) {
     THROW_RUNTIME_ERROR("SQLiteFTSIndex::Dump: index is not open");
   }
 
@@ -341,32 +342,52 @@ void SQLiteFTSIndex::Dump(Checkpoint& ckp, CheckpointManifest& manifest,
   manifest.mutable_modules().at(accessor_key).mark_as_referenced_module();
   manifest.mutable_modules().at(key).set_ref(kAccessorRef, accessor_key);
 
-  SQLiteFTSDumpContainer container(&database_, runtime_path_);
+  SQLiteFTSDumpContainer container(database_, runtime_path_);
   auto persisted_path = ckp.Commit(container);
   manifest.mutable_modules().at(key).set_path(kIndexFilePath, persisted_path);
 
   auto runtime_uuid = ckp.CreateRuntimeObject();
   runtime_path_ = ckp.runtime_dir() + "/" + runtime_uuid;
   file_utils::copy_file(persisted_path, runtime_path_, true);
-  database_.Open(runtime_path_);
+  database_->Open(runtime_path_);
   ValidateExistingTable();
 }
 
-void SQLiteFTSIndex::Detach(Checkpoint&, MemoryLevel) {
-  THROW_NOT_SUPPORTED_EXCEPTION("SQLiteFTSIndex does not support Detach");
+void SQLiteFTSIndex::Detach(Checkpoint& ckp, MemoryLevel level) {
+  if (index_id_accessor_) {
+    index_id_accessor_->Detach(ckp, level);
+  }
 }
 
 std::unique_ptr<Module> SQLiteFTSIndex::Clone() const {
-  THROW_NOT_SUPPORTED_EXCEPTION("SQLiteFTSIndex does not support Clone");
+  auto cloned = std::make_unique<SQLiteFTSIndex>();
+  if (meta_) {
+    cloned->meta_ = std::make_unique<IndexMeta>(*meta_);
+  }
+  if (index_id_accessor_) {
+    auto accessor = index_id_accessor_->Clone();
+    cloned->index_id_accessor_.reset(
+        static_cast<IndexIDAccessor*>(accessor.release()));
+  }
+  cloned->database_ = database_;
+  cloned->runtime_path_ = runtime_path_;
+  cloned->table_name_ = table_name_;
+  cloned->tokenizer_ = tokenizer_;
+  cloned->prefix_ = prefix_;
+  cloned->detail_ = detail_;
+  cloned->rank_ = rank_;
+  cloned->candidate_batch_size_ = candidate_batch_size_;
+  cloned->column_weights_ = column_weights_;
+  return cloned;
 }
 
 Status SQLiteFTSIndex::BeginBuild() {
-  if (!database_.IsOpen()) {
+  if (!database_ || !database_->IsOpen()) {
     return Status::RuntimeError(
         "SQLiteFTSIndex must be open before beginning a build");
   }
   try {
-    database_.Execute("BEGIN TRANSACTION;");
+    database_->Execute("BEGIN TRANSACTION;");
     return Status::OK();
   } catch (const std::exception& error) {
     return Status::RuntimeError("SQLiteFTSIndex begin build failed: " +
@@ -375,12 +396,12 @@ Status SQLiteFTSIndex::BeginBuild() {
 }
 
 Status SQLiteFTSIndex::FinishBuild() {
-  if (!database_.IsOpen()) {
+  if (!database_ || !database_->IsOpen()) {
     return Status::RuntimeError(
         "SQLiteFTSIndex must be open before finishing a build");
   }
   try {
-    database_.Execute("COMMIT;");
+    database_->Execute("COMMIT;");
     return Status::OK();
   } catch (const std::exception& error) {
     return Status::RuntimeError("SQLiteFTSIndex finish build failed: " +
@@ -393,7 +414,7 @@ SQLiteFTSIndex::QueryCandidates(const SQLiteFTSQueryParams& params) {
   if (params.topk == 0) {
     RETURN_INVALID_ARGUMENT_ERROR("SQLITE_FTS topk must be positive");
   }
-  if (!database_.IsOpen()) {
+  if (!database_ || !database_->IsOpen()) {
     RETURN_INVALID_ARGUMENT_ERROR("SQLITE_FTS index is not open");
   }
   if (params.query_string.empty() || IsBlank(params.query_string)) {
@@ -406,7 +427,7 @@ SQLiteFTSIndex::QueryCandidates(const SQLiteFTSQueryParams& params) {
       rank_expression += ", " + std::to_string(weight);
     }
     rank_expression += ")";
-    auto statement = database_.Prepare(
+    auto statement = database_->Prepare(
         "SELECT rowid, " + rank_expression + " AS score FROM " + table_name_ +
         " WHERE " + table_name_ + " MATCH ?1 ORDER BY score ASC LIMIT ?2;");
     statement.BindText(1, params.query_string);
@@ -516,7 +537,7 @@ Status SQLiteFTSIndex::AppendImpl(index_id_t index_id,
     return Status(StatusCode::ERR_INVALID_ARGUMENT,
                   "SQLITE_FTS values must match the indexed STRING properties");
   }
-  if (!database_.IsOpen()) {
+  if (!database_ || !database_->IsOpen()) {
     return Status::RuntimeError("SQLiteFTSIndex must be open before append");
   }
   try {
@@ -527,7 +548,7 @@ Status SQLiteFTSIndex::AppendImpl(index_id_t index_id,
       placeholders += ", ?" + std::to_string(i + 2);
     }
     sql += ") VALUES (" + placeholders + ");";
-    auto statement = database_.Prepare(sql);
+    auto statement = database_->Prepare(sql);
     statement.BindInt64(1, index_id);
     for (size_t i = 0; i < values.size(); ++i) {
       statement.BindText(static_cast<int>(i + 2),

@@ -24,7 +24,8 @@ struct SQLiteFTSRankedResult {
 
 class SQLiteFTSDumpContainer final : public IDataContainer {
  public:
-  SQLiteFTSDumpContainer(SQLiteDatabase* database, std::string runtime_path);
+  SQLiteFTSDumpContainer(std::shared_ptr<SQLiteDatabase> database,
+                         std::string runtime_path);
 
   ContainerType GetContainerType() const override {
     return ContainerType::kFileSharedMMap;
@@ -38,7 +39,7 @@ class SQLiteFTSDumpContainer final : public IDataContainer {
   std::unique_ptr<IDataContainer> Fork(Checkpoint&, MemoryLevel) override;
 
  private:
-  SQLiteDatabase* database_;
+  std::shared_ptr<SQLiteDatabase> database_;
   std::string runtime_path_;
 };
 
@@ -89,7 +90,7 @@ class SQLiteFTSIndex final : public StorageIndex {
   static constexpr const char* kIndexFilePath = "sqlite_fts_file";
   static constexpr const char* kAccessorRef = "index_id_accessor";
 
-  SQLiteDatabase database_;
+  std::shared_ptr<SQLiteDatabase> database_{std::make_shared<SQLiteDatabase>()};
   std::string runtime_path_;
   std::string table_name_;
   std::string tokenizer_{"unicode61"};
