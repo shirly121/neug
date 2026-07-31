@@ -197,6 +197,21 @@ class HNSWIndexLifecycleTest : public ::testing::Test {
   }
 };
 
+TEST_F(HNSWIndexLifecycleTest, VecSourceTracksResizedColumnBuffer) {
+  constexpr size_t kInitialCapacity = 2;
+  constexpr size_t kResizedCapacity = 4;
+  auto column = MakeVecColumn(*checkpoint_, kDimension, kInitialCapacity);
+  HNSWVecSource source(column.get(), DataTypeId::kFloat, kDimension);
+
+  auto* initial_buffer = static_cast<const uint8_t*>(column->get_buffer_ptr());
+  EXPECT_EQ(source.get_vector(1), initial_buffer + kDimension * sizeof(float));
+
+  column->resize(kResizedCapacity);
+  auto* resized_buffer = static_cast<const uint8_t*>(column->get_buffer_ptr());
+  EXPECT_EQ(source.get_vector(kInitialCapacity),
+            resized_buffer + kInitialCapacity * kDimension * sizeof(float));
+}
+
 TEST_F(HNSWIndexLifecycleTest, ArrayColumnEmptyDumpReopenAppendDumpReopen) {
   constexpr size_t kRowCount = 8;
   constexpr const char* kArrayColumnKey = "array_column";

@@ -92,9 +92,12 @@ int ParsePositive(const common::case_insensitive_map_t<std::string>& options,
 }
 }  // namespace
 
-HNSWVecSource::HNSWVecSource(const void* buffer_ptr, DataTypeId element_type,
+HNSWVecSource::HNSWVecSource(const VecColumn* column, DataTypeId element_type,
                              size_t dimension)
-    : buffer_ptr_(buffer_ptr), vector_byte_size_(0) {
+    : column_(column), vector_byte_size_(0) {
+  if (!column_) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("HNSW vector source requires a VecColumn");
+  }
   if (element_type == DataTypeId::kFloat) {
     vector_byte_size_ = sizeof(float) * dimension;
   } else if (element_type == DataTypeId::kDouble) {
@@ -106,7 +109,14 @@ HNSWVecSource::HNSWVecSource(const void* buffer_ptr, DataTypeId element_type,
 }
 
 const void* HNSWVecSource::get_vector(uint32_t node_id) const {
-  return static_cast<const uint8_t*>(buffer_ptr_) + node_id * vector_byte_size_;
+  // auto capacity = column_->size();
+  // if (node_id >= capacity) {
+  //   THROW_RUNTIME_ERROR(
+  //       "HNSW vector source node ID " + std::to_string(node_id) +
+  //       " is out of range (capacity=" + std::to_string(capacity) + ")");
+  // }
+  return static_cast<const uint8_t*>(column_->get_buffer_ptr()) +
+         node_id * vector_byte_size_;
 }
 
 ZVecDumpContainer::ZVecDumpContainer(zvec::core_interface::Index* index,
@@ -269,7 +279,7 @@ Status HNSWIndex::Rebind(const IndexBindContext& context) {
                   "HNSWIndex requires a bound vector buffer");
   }
   vec_source_ =
-      std::make_unique<HNSWVecSource>(buffer_ptr, element_type, dimension_);
+      std::make_unique<HNSWVecSource>(column, element_type, dimension_);
   auto* vec_accessor =
       dynamic_cast<VecIndexIDAccessor*>(index_id_accessor_.get());
   if (vec_accessor) {

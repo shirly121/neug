@@ -29,13 +29,13 @@ struct HNSWIndexQueryParams final : IndexQueryParams {
 
 class HNSWVecSource final : public zvec::core::VectorSource {
  public:
-  HNSWVecSource(const void* buffer_ptr, DataTypeId element_type,
+  HNSWVecSource(const VecColumn* column, DataTypeId element_type,
                 size_t dimension);
 
   const void* get_vector(uint32_t node_id) const override;
 
  private:
-  const void* buffer_ptr_;
+  const VecColumn* column_;
   size_t vector_byte_size_;
 };
 

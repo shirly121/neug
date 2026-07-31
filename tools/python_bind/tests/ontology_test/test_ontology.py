@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from neug import Session
 from neug.database import Database
 
 DEFAULT_DATA_PATH = os.environ.get("NEUG_HNSW_TEST_DATA")
@@ -400,6 +401,169 @@ def test_updated_vector_is_searchable(ontology_graph):
     )
     assert rows[0][2] == pytest.approx(stored_score, abs=1e-5)
     target["embedding"] = query_vector.copy()
+
+
+def test_tp_hnsw_read_after_vec_column_resize(tmp_path, unused_tcp_port):
+    """Reproduce an HNSWVecSource pointer becoming stale after VecColumn resize."""
+    initial_count = 4096
+    target_id = initial_count // 2
+
+    def embedding(entity_id):
+        return [
+            float(entity_id),
+            float(entity_id % 31),
+            float(entity_id % 127),
+        ]
+
+    target_embedding = embedding(target_id)
+    target_literal = _array_literal(target_embedding)
+    entity_path = tmp_path / "resize_entities.jsonl"
+    with entity_path.open("w", encoding="utf-8") as stream:
+        for entity_id in range(initial_count):
+            stream.write(
+                json.dumps(
+                    {
+                        "id": entity_id,
+                        "embedding": embedding(entity_id),
+                    }
+                )
+                + "\n"
+            )
+
+    db = Database(db_path=str(tmp_path / "resize-database"), mode="w")
+    conn = db.connect()
+    read_session = None
+    update_session = None
+    try:
+        conn.execute("LOAD hybrid_search;")
+        conn.execute(
+            "CREATE NODE TABLE ResizeEntity("
+            "id INT64 PRIMARY KEY, embedding FLOAT[3]);"
+        )
+        conn.execute(
+            f'COPY ResizeEntity FROM (LOAD FROM "{entity_path}" '
+            "RETURN id, CAST(embedding, 'FLOAT[3]'));"
+        )
+        conn.execute(
+            "CREATE INDEX resize_entity_hnsw ON ResizeEntity "
+            "USING HNSW (embedding) "
+            "WITH (metric = 'l2', m = 16, ef_construction = 100);"
+        )
+        conn.close()
+        conn = None
+
+        endpoint = db.serve(
+            port=unused_tcp_port,
+            host="localhost",
+            blocking=False,
+            thread_num=4,
+        )
+        read_session = Session(endpoint, timeout="120s")
+        update_session = Session(endpoint, timeout="120s")
+        vector_query = (
+            "MATCH (n:ResizeEntity) "
+            "RETURN n.id, "
+            f"vector_distance_l2(n.embedding, {target_literal}) AS score "
+            "ORDER BY score ASC LIMIT 1;"
+        )
+        before_resize = list(read_session.execute(vector_query, access_mode="read"))
+        assert before_resize == [[target_id, pytest.approx(0.0, abs=1e-6)]]
+
+        # PropertyGraph::Open reserves 25% spare capacity for a table with at
+        # least 4096 rows. Insert one row beyond that boundary in a single
+        # update transaction so EnsureCapacity resizes the VecColumn buffer.
+        reopened_capacity = initial_count + initial_count // 4
+        inserted_nodes = ",".join(
+            "(:ResizeEntity {id: "
+            f"{entity_id}, embedding: {_array_literal(embedding(entity_id))}}})"
+            for entity_id in range(initial_count, reopened_capacity + 1)
+        )
+        list(
+            update_session.execute(
+                f"CREATE {inserted_nodes};",
+                access_mode="update",
+            )
+        )
+
+        post_resize_target_id = reopened_capacity
+        post_resize_target_embedding = embedding(post_resize_target_id)
+        stored_target = list(
+            read_session.execute(
+                "MATCH (n:ResizeEntity) "
+                f"WHERE n.id = {post_resize_target_id} "
+                "RETURN n.embedding;",
+                access_mode="read",
+            )
+        )
+        assert stored_target == [[post_resize_target_embedding]]
+
+        post_resize_target_literal = _array_literal(post_resize_target_embedding)
+        # HNSWVecSource cached the buffer address during Rebind. VecColumn
+        # resize replaces the mmap. The first row outside the old capacity
+        # therefore dereferences beyond the stale buffer unless the source
+        # resolves the current buffer for every access.
+        vector_query = (
+            "MATCH (n:ResizeEntity) "
+            "RETURN n.id, "
+            "vector_distance_l2("
+            f"n.embedding, {post_resize_target_literal}) AS score "
+            "ORDER BY score ASC LIMIT 1;"
+        )
+        after_resize = list(read_session.execute(vector_query, access_mode="read"))
+        assert after_resize == [[post_resize_target_id, pytest.approx(0.0, abs=1e-6)]]
+    finally:
+        if read_session is not None:
+            read_session.close()
+        if update_session is not None:
+            update_session.close()
+        if conn is not None:
+            conn.close()
+        db.close()
+
+
+def test_ap_hnsw_read_after_insert_into_empty_index(tmp_path):
+    """Search an AP HNSW index after its initially empty VecColumn resizes."""
+    point_count = 4097
+    batch_size = 128
+    db = Database(db_path=str(tmp_path / "empty-hnsw-database"), mode="w")
+    conn = db.connect()
+    try:
+        conn.execute("LOAD hybrid_search;")
+        conn.execute(
+            "CREATE NODE TABLE EmptyEntity("
+            "id INT64 PRIMARY KEY, embedding FLOAT[3]);"
+        )
+        conn.execute(
+            "CREATE INDEX empty_entity_hnsw ON EmptyEntity "
+            "USING HNSW (embedding) "
+            "WITH (metric = 'ip', m = 16, ef_construction = 100);"
+        )
+
+        # A newly created vertex table has capacity for 4096 rows. Inserting
+        # row 4097 forces StorageAPUpdateInterface::AddVertex to resize it.
+        for start in range(0, point_count, batch_size):
+            nodes = []
+            for entity_id in range(start, min(start + batch_size, point_count)):
+                value = entity_id / (point_count - 1)
+                nodes.append(
+                    "(:EmptyEntity {"
+                    f"id: {entity_id}, embedding: [{value}, 0.0, 0.0]"
+                    "})"
+                )
+            conn.execute("CREATE " + ",".join(nodes) + ";")
+
+        query = (
+            "MATCH (n:EmptyEntity) "
+            "RETURN n.id, "
+            "vector_distance_ip(n.embedding, [1.0, 0.0, 0.0]) AS score "
+            "ORDER BY score DESC LIMIT 1;"
+        )
+        rows = _execute_index_query(conn, query, "HNSWIndexScan")
+
+        assert rows == [[point_count - 1, pytest.approx(1.0, abs=1e-6)]]
+    finally:
+        conn.close()
+        db.close()
 
 
 def _assert_fts_result(rows, score_column, unique_uids=True):
