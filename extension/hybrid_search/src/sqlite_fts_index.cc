@@ -451,19 +451,34 @@ Status SQLiteFTSIndex::FinishBuild() {
   }
 }
 
-result<std::vector<SQLiteFTSIndex::RankedCandidate>>
-SQLiteFTSIndex::QueryCandidates(const SQLiteFTSQueryParams& params) {
+result<std::vector<SQLiteFTSRankedResult>> SQLiteFTSIndex::RankedSearch(
+    const SQLiteFTSQueryParams& params) {
   if (params.topk == 0) {
     RETURN_INVALID_ARGUMENT_ERROR("SQLITE_FTS topk must be positive");
+  }
+  if (!index_id_accessor_) {
+    RETURN_INVALID_ARGUMENT_ERROR(
+        "SQLITE_FTS index ID accessor is not initialized");
   }
   if (!database_ || !database_->IsOpen()) {
     RETURN_INVALID_ARGUMENT_ERROR("SQLITE_FTS index is not open");
   }
   if (params.query_string.empty() || IsBlank(params.query_string)) {
-    return std::vector<RankedCandidate>{};
+    return std::vector<SQLiteFTSRankedResult>{};
   }
 
   try {
+    std::unordered_set<index_id_t> allowed;
+    if (params.use_scalar_filter) {
+      allowed.reserve(params.scalar_filter.size());
+      for (auto vid : params.scalar_filter) {
+        auto index_id = index_id_accessor_->GetIndexIDByVID(vid);
+        if (index_id != INVALID_INDEX_ID) {
+          allowed.insert(index_id);
+        }
+      }
+    }
+
     std::lock_guard lock(prepared_statements_->mutex);
     auto& statement = prepared_statements_->query;
     statement.Reset();
@@ -478,61 +493,34 @@ SQLiteFTSIndex::QueryCandidates(const SQLiteFTSQueryParams& params) {
                fetch_limit,
                static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))));
 
-    std::vector<RankedCandidate> candidates;
+    std::vector<SQLiteFTSRankedResult> results;
+    results.reserve(params.topk);
     while (statement.Step() == SQLITE_ROW) {
       auto rowid = statement.ColumnInt64(0);
       if (rowid < 0 || static_cast<uint64_t>(rowid) >
                            std::numeric_limits<index_id_t>::max()) {
         continue;
       }
-      candidates.push_back(RankedCandidate{static_cast<index_id_t>(rowid),
-                                           statement.ColumnDouble(1)});
+      const auto index_id = static_cast<index_id_t>(rowid);
+      if (params.use_scalar_filter && !allowed.contains(index_id)) {
+        continue;
+      }
+      auto vid = index_id_accessor_->GetVIDByIndexID(index_id);
+      if (vid == INVALID_VID) {
+        continue;
+      }
+      results.push_back(SQLiteFTSRankedResult{vid, statement.ColumnDouble(1)});
+      if (results.size() == params.topk) {
+        break;
+      }
     }
-    return candidates;
+    return results;
   } catch (const std::exception& error) {
     RETURN_STATUS_ERROR(
         StatusCode::ERR_INVALID_ARGUMENT,
         "SQLITE_FTS query failed: " +
             EnhanceFTS5Error(params.query_string, error.what()));
   }
-}
-
-result<std::vector<SQLiteFTSRankedResult>> SQLiteFTSIndex::RankedSearch(
-    const SQLiteFTSQueryParams& params) {
-  if (!index_id_accessor_) {
-    RETURN_INVALID_ARGUMENT_ERROR(
-        "SQLITE_FTS index ID accessor is not initialized");
-  }
-  auto candidates = QueryCandidates(params);
-  if (!candidates) {
-    return tl::unexpected(candidates.error());
-  }
-  std::unordered_set<index_id_t> allowed;
-  if (params.use_scalar_filter) {
-    allowed.reserve(params.scalar_filter.size());
-    for (auto vid : params.scalar_filter) {
-      auto index_id = index_id_accessor_->GetIndexIDByVID(vid);
-      if (index_id != INVALID_INDEX_ID) {
-        allowed.insert(index_id);
-      }
-    }
-  }
-  std::vector<SQLiteFTSRankedResult> results;
-  results.reserve(params.topk);
-  for (const auto& candidate : *candidates) {
-    if (params.use_scalar_filter && !allowed.contains(candidate.index_id)) {
-      continue;
-    }
-    auto vid = index_id_accessor_->GetVIDByIndexID(candidate.index_id);
-    if (vid == INVALID_VID) {
-      continue;
-    }
-    results.push_back(SQLiteFTSRankedResult{vid, candidate.score});
-    if (results.size() == params.topk) {
-      break;
-    }
-  }
-  return results;
 }
 
 result<std::vector<index_id_t>> SQLiteFTSIndex::SearchImpl(
@@ -542,20 +530,16 @@ result<std::vector<index_id_t>> SQLiteFTSIndex::SearchImpl(
     RETURN_INVALID_ARGUMENT_ERROR(
         "SQLiteFTSIndex::Search requires SQLiteFTSQueryParams");
   }
-  auto candidates = QueryCandidates(*fts_params);
-  if (!candidates) {
-    return tl::unexpected(candidates.error());
+  auto ranked_results = RankedSearch(*fts_params);
+  if (!ranked_results) {
+    return tl::unexpected(ranked_results.error());
   }
   std::vector<index_id_t> results;
-  results.reserve(fts_params->topk);
-  for (const auto& candidate : *candidates) {
-    if (index_id_accessor_->GetVIDByIndexID(candidate.index_id) ==
-        INVALID_VID) {
-      continue;
-    }
-    results.push_back(candidate.index_id);
-    if (results.size() == fts_params->topk) {
-      break;
+  results.reserve(ranked_results->size());
+  for (const auto& result : *ranked_results) {
+    auto index_id = index_id_accessor_->GetIndexIDByVID(result.vid);
+    if (index_id != INVALID_INDEX_ID) {
+      results.push_back(index_id);
     }
   }
   return results;

@@ -81,11 +81,6 @@ class SQLiteFTSIndex final : public StorageIndex {
     SQLiteStatement query;
   };
 
-  struct RankedCandidate {
-    index_id_t index_id;
-    double score;
-  };
-
   void ParseOptions();
   void OpenInternal(Checkpoint& ckp, const CheckpointManifest* manifest,
                     const ModuleDescriptor& descriptor, MemoryLevel level);
@@ -93,8 +88,6 @@ class SQLiteFTSIndex final : public StorageIndex {
   void ValidateExistingTable();
   void PrepareStatements();
   void FinalizeStatements();
-  result<std::vector<RankedCandidate>> QueryCandidates(
-      const SQLiteFTSQueryParams& params);
 
   static constexpr const char* kIndexFilePath = "sqlite_fts_file";
   static constexpr const char* kAccessorRef = "index_id_accessor";
