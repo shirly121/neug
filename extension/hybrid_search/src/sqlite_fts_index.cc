@@ -266,6 +266,34 @@ void SQLiteFTSIndex::ValidateExistingTable() {
   }
 }
 
+void SQLiteFTSIndex::PrepareStatements() {
+  std::string insert_sql = "INSERT INTO " + table_name_ + "(rowid";
+  std::string placeholders = "?1";
+  const auto property_count = meta_->schema.GetPropertyNames().size();
+  for (size_t i = 0; i < property_count; ++i) {
+    insert_sql += ", column_" + std::to_string(i);
+    placeholders += ", ?" + std::to_string(i + 2);
+  }
+  insert_sql += ") VALUES (" + placeholders + ");";
+
+  std::string rank_expression = rank_ + "(" + table_name_;
+  for (double weight : column_weights_) {
+    rank_expression += ", " + std::to_string(weight);
+  }
+  rank_expression += ")";
+  auto query_sql = "SELECT rowid, " + rank_expression + " AS score FROM " +
+                   table_name_ + " WHERE " + table_name_ +
+                   " MATCH ?1 ORDER BY score ASC LIMIT ?2;";
+
+  prepared_statements_->insert = database_->Prepare(insert_sql);
+  prepared_statements_->query = database_->Prepare(query_sql);
+}
+
+void SQLiteFTSIndex::FinalizeStatements() {
+  prepared_statements_->insert = SQLiteStatement{};
+  prepared_statements_->query = SQLiteStatement{};
+}
+
 void SQLiteFTSIndex::Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
                           MemoryLevel level) {
   OpenInternal(ckp, nullptr, descriptor, level);
@@ -308,6 +336,7 @@ void SQLiteFTSIndex::OpenInternal(Checkpoint& ckp,
   bool has_existing = index_path && !index_path->empty() &&
                       std::filesystem::exists(*index_path);
   database_ = std::make_shared<SQLiteDatabase>();
+  prepared_statements_ = std::make_shared<PreparedStatements>();
   try {
     if (has_existing) {
       file_utils::copy_file(*index_path, runtime_path_, true);
@@ -318,7 +347,9 @@ void SQLiteFTSIndex::OpenInternal(Checkpoint& ckp,
     } else {
       CreateTable();
     }
+    PrepareStatements();
   } catch (...) {
+    FinalizeStatements();
     database_->Close();
     std::error_code error;
     std::filesystem::remove(runtime_path_, error);
@@ -336,21 +367,29 @@ void SQLiteFTSIndex::Dump(Checkpoint& ckp, CheckpointManifest& manifest,
     THROW_RUNTIME_ERROR("SQLiteFTSIndex::Dump: index is not open");
   }
 
-  StorageIndex::Dump(ckp, manifest, key);
-  const auto accessor_key = "sqlite_fts_accessor_" + meta_->name;
-  index_id_accessor_->Dump(ckp, manifest, accessor_key);
-  manifest.mutable_modules().at(accessor_key).mark_as_referenced_module();
-  manifest.mutable_modules().at(key).set_ref(kAccessorRef, accessor_key);
+  std::lock_guard lock(prepared_statements_->mutex);
+  FinalizeStatements();
+  try {
+    StorageIndex::Dump(ckp, manifest, key);
+    const auto accessor_key = "sqlite_fts_accessor_" + meta_->name;
+    index_id_accessor_->Dump(ckp, manifest, accessor_key);
+    manifest.mutable_modules().at(accessor_key).mark_as_referenced_module();
+    manifest.mutable_modules().at(key).set_ref(kAccessorRef, accessor_key);
 
-  SQLiteFTSDumpContainer container(database_, runtime_path_);
-  auto persisted_path = ckp.Commit(container);
-  manifest.mutable_modules().at(key).set_path(kIndexFilePath, persisted_path);
+    SQLiteFTSDumpContainer container(database_, runtime_path_);
+    auto persisted_path = ckp.Commit(container);
+    manifest.mutable_modules().at(key).set_path(kIndexFilePath, persisted_path);
 
-  auto runtime_uuid = ckp.CreateRuntimeObject();
-  runtime_path_ = ckp.runtime_dir() + "/" + runtime_uuid;
-  file_utils::copy_file(persisted_path, runtime_path_, true);
-  database_->Open(runtime_path_);
-  ValidateExistingTable();
+    auto runtime_uuid = ckp.CreateRuntimeObject();
+    runtime_path_ = ckp.runtime_dir() + "/" + runtime_uuid;
+    file_utils::copy_file(persisted_path, runtime_path_, true);
+    database_->Open(runtime_path_);
+    ValidateExistingTable();
+    PrepareStatements();
+  } catch (...) {
+    FinalizeStatements();
+    throw;
+  }
 }
 
 void SQLiteFTSIndex::Detach(Checkpoint& ckp, MemoryLevel level) {
@@ -370,6 +409,7 @@ std::unique_ptr<Module> SQLiteFTSIndex::Clone() const {
         static_cast<IndexIDAccessor*>(accessor.release()));
   }
   cloned->database_ = database_;
+  cloned->prepared_statements_ = prepared_statements_;
   cloned->runtime_path_ = runtime_path_;
   cloned->table_name_ = table_name_;
   cloned->tokenizer_ = tokenizer_;
@@ -387,6 +427,7 @@ Status SQLiteFTSIndex::BeginBuild() {
         "SQLiteFTSIndex must be open before beginning a build");
   }
   try {
+    std::lock_guard lock(prepared_statements_->mutex);
     database_->Execute("BEGIN TRANSACTION;");
     return Status::OK();
   } catch (const std::exception& error) {
@@ -401,6 +442,7 @@ Status SQLiteFTSIndex::FinishBuild() {
         "SQLiteFTSIndex must be open before finishing a build");
   }
   try {
+    std::lock_guard lock(prepared_statements_->mutex);
     database_->Execute("COMMIT;");
     return Status::OK();
   } catch (const std::exception& error) {
@@ -422,14 +464,9 @@ SQLiteFTSIndex::QueryCandidates(const SQLiteFTSQueryParams& params) {
   }
 
   try {
-    std::string rank_expression = rank_ + "(" + table_name_;
-    for (double weight : column_weights_) {
-      rank_expression += ", " + std::to_string(weight);
-    }
-    rank_expression += ")";
-    auto statement = database_->Prepare(
-        "SELECT rowid, " + rank_expression + " AS score FROM " + table_name_ +
-        " WHERE " + table_name_ + " MATCH ?1 ORDER BY score ASC LIMIT ?2;");
+    std::lock_guard lock(prepared_statements_->mutex);
+    auto& statement = prepared_statements_->query;
+    statement.Reset();
     statement.BindText(1, params.query_string);
     auto fetch_limit =
         params.use_scalar_filter
@@ -541,14 +578,9 @@ Status SQLiteFTSIndex::AppendImpl(index_id_t index_id,
     return Status::RuntimeError("SQLiteFTSIndex must be open before append");
   }
   try {
-    std::string sql = "INSERT INTO " + table_name_ + "(rowid";
-    std::string placeholders = "?1";
-    for (size_t i = 0; i < values.size(); ++i) {
-      sql += ", column_" + std::to_string(i);
-      placeholders += ", ?" + std::to_string(i + 2);
-    }
-    sql += ") VALUES (" + placeholders + ");";
-    auto statement = database_->Prepare(sql);
+    std::lock_guard lock(prepared_statements_->mutex);
+    auto& statement = prepared_statements_->insert;
+    statement.Reset();
     statement.BindInt64(1, index_id);
     for (size_t i = 0; i < values.size(); ++i) {
       statement.BindText(static_cast<int>(i + 2),

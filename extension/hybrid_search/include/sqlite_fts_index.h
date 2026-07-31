@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -74,6 +75,12 @@ class SQLiteFTSIndex final : public StorageIndex {
                     const std::vector<Value>& values) override;
 
  private:
+  struct PreparedStatements {
+    std::mutex mutex;
+    SQLiteStatement insert;
+    SQLiteStatement query;
+  };
+
   struct RankedCandidate {
     index_id_t index_id;
     double score;
@@ -84,6 +91,8 @@ class SQLiteFTSIndex final : public StorageIndex {
                     const ModuleDescriptor& descriptor, MemoryLevel level);
   void CreateTable();
   void ValidateExistingTable();
+  void PrepareStatements();
+  void FinalizeStatements();
   result<std::vector<RankedCandidate>> QueryCandidates(
       const SQLiteFTSQueryParams& params);
 
@@ -91,6 +100,8 @@ class SQLiteFTSIndex final : public StorageIndex {
   static constexpr const char* kAccessorRef = "index_id_accessor";
 
   std::shared_ptr<SQLiteDatabase> database_{std::make_shared<SQLiteDatabase>()};
+  std::shared_ptr<PreparedStatements> prepared_statements_{
+      std::make_shared<PreparedStatements>()};
   std::string runtime_path_;
   std::string table_name_;
   std::string tokenizer_{"unicode61"};
